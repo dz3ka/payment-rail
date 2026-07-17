@@ -1,4 +1,4 @@
-// Command api serves Conduit's external REST payments API: create, get, list,
+// Command api serves Payment Rail's external REST payments API: create, get, list,
 // and cancel payments, with client-supplied idempotency keys on create.
 //
 // It rides the payments service (which owns the ledger transaction) and an

@@ -7,11 +7,11 @@
 
 ## 1. What we built
 
-M0 is the empty airframe of Conduit. There is no HTTP server, no gRPC, no database
+M0 is the empty airframe of Payment Rail. There is no HTTP server, no gRPC, no database
 yet — and deliberately so. What exists is the *structure* that the next seven
 milestones will bolt real components onto: a single Go module (`github.com/dz3ka/payment-rail`),
 six binaries under `cmd/` (`api`, `ledger`, `signer`, `chainwatcher`, `webhookd`, and
-the `conduitctl` operator CLI), and three shared private packages under `internal/`
+the `paymentrailctl` operator CLI), and three shared private packages under `internal/`
 (`config`, `service`, `version`).
 
 Each of the six `main.go` files is intentionally about 20 lines. They do essentially
@@ -30,7 +30,7 @@ on the Go; the ADRs (especially ADR-0001) carry the architectural "why."
 
 ## 2. The design decision — one module, many binaries, one bootstrap
 
-**The problem.** Conduit is five services plus a CLI, and one of those services — the
+**The problem.** Payment Rail is five services plus a CLI, and one of those services — the
 `signer` — holds private keys and must be *network-isolatable* from everything else.
 Every arrow between services is a trust and failure boundary. We need a structure that
 makes those boundaries real (separately deployable, separately network-scoped
@@ -52,7 +52,7 @@ the public internet.
   touches `api` and `ledger` together becomes two PRs in two repos with a version bump
   in between. The monorepo keeps one CI pipeline and lets cross-service refactors land
   atomically in a single commit. Rejected.
-- **One binary with sub-commands** (`conduit api`, `conduit signer`, …, à la
+- **One binary with sub-commands** (`payment-rail api`, `payment-rail signer`, …, à la
   `kubectl`). This is the simplest thing to run — one artifact, one image. But it
   *collapses the signer's trust boundary*: if the signer's key-handling code is
   compiled into the same binary as the public API, you can no longer network-isolate
@@ -99,7 +99,7 @@ being package-private-to-the-module by default. Compare: Java's `public`/`packag
 operates per-package and a determined consumer can still reach in; Go's `internal/`
 makes "this is my private implementation, not your API surface" a hard compile error.
 For a library you'd expose a curated `pkg/` (or top-level) API and hide the rest in
-`internal/`. Conduit has *no* public API surface — it's an application, not a library —
+`internal/`. Payment Rail has *no* public API surface — it's an application, not a library —
 so essentially everything lives in `internal/`, and `cmd/` holds only the `main`
 packages. That's the idiomatic layout for an app: `cmd/` = entrypoints, `internal/` =
 the private guts.
@@ -319,10 +319,10 @@ Two hard constraints this explains:
 ### 3.7 Wrapped errors instead of panics in `config.Load`
 
 ```go
-if v := os.Getenv("CONDUIT_SHUTDOWN_TIMEOUT_SECONDS"); v != "" {
+if v := os.Getenv("PAYMENT_RAIL_SHUTDOWN_TIMEOUT_SECONDS"); v != "" {
 	secs, err := strconv.Atoi(v)
 	if err != nil {
-		return Config{}, fmt.Errorf("config: parse CONDUIT_SHUTDOWN_TIMEOUT_SECONDS %q: %w", v, err)
+		return Config{}, fmt.Errorf("config: parse PAYMENT_RAIL_SHUTDOWN_TIMEOUT_SECONDS %q: %w", v, err)
 	}
 	cfg.ShutdownTimeout = time.Duration(secs) * time.Second
 }
@@ -350,9 +350,9 @@ first" placeholder.
 
 ```go
 func TestLoadDefaults(t *testing.T) {
-	t.Setenv("CONDUIT_ENV", "")
-	t.Setenv("CONDUIT_LOG_LEVEL", "")
-	t.Setenv("CONDUIT_SHUTDOWN_TIMEOUT_SECONDS", "")
+	t.Setenv("PAYMENT_RAIL_ENV", "")
+	t.Setenv("PAYMENT_RAIL_LOG_LEVEL", "")
+	t.Setenv("PAYMENT_RAIL_SHUTDOWN_TIMEOUT_SECONDS", "")
 	cfg, err := Load()
 	// ...
 }

@@ -1,4 +1,4 @@
-// Package ledger is Conduit's double-entry accounting domain. It owns the rules
+// Package ledger is Payment Rail's double-entry accounting domain. It owns the rules
 // that make money movement trustworthy — postings must balance, no account may
 // go negative, and each external reference posts at most once — and it drives
 // those rules through a narrow transactor seam so the same logic runs against a

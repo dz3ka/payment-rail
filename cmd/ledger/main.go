@@ -1,4 +1,4 @@
-// Command ledger owns Conduit's double-entry ledger: accounts, journal
+// Command ledger owns Payment Rail's double-entry ledger: accounts, journal
 // entries, and derived balances in Postgres — the internal source of truth.
 //
 // M0: entrypoint skeleton only. The gRPC ledger service and its serializable

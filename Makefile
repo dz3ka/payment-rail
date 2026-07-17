@@ -1,6 +1,6 @@
-# Conduit developer Makefile. Targets assume Go 1.24+ and (for up/down) Docker.
+# Payment Rail developer Makefile. Targets assume Go 1.24+ and (for up/down) Docker.
 
-BINARIES   := api ledger signer chainwatcher webhookd conduitctl
+BINARIES   := api ledger signer chainwatcher webhookd paymentrailctl
 BIN_DIR    := bin
 
 VERSION    ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)

@@ -1,6 +1,6 @@
-# Conduit — Go Learning Journal
+# Payment Rail — Go Learning Journal
 
-Conduit is a deliberate Go learning vehicle. Each milestone produces a lesson
+Payment Rail is a deliberate Go learning vehicle. Each milestone produces a lesson
 capturing the **why** behind the code: the Go idioms used, the alternatives
 weighed, and the mistakes avoided. This index links them in order.
 

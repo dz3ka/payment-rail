@@ -1,4 +1,4 @@
--- Conduit ledger schema (M1 / WP1).
+-- Payment Rail ledger schema (M1 / WP1).
 --
 -- Derived-balances design: an account's balance is NEVER stored. It is always
 -- computed on demand as Σ(credit) − Σ(debit) over that account's entry_lines

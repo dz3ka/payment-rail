@@ -1,4 +1,4 @@
-// Package service provides the shared bootstrap used by every Conduit binary so
+// Package service provides the shared bootstrap used by every Payment Rail binary so
 // each cmd/<svc>/main.go stays a thin entrypoint. It wires config, a structured
 // logger, and signal-driven graceful shutdown — the skeleton that later
 // milestones hang real servers and consumers off of.

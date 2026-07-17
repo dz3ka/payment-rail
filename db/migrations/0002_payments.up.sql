@@ -1,4 +1,4 @@
--- Conduit payments schema (M1 / IMPL-A).
+-- Payment Rail payments schema (M1 / IMPL-A).
 --
 -- A payment is the API-facing record of one money movement; the authoritative
 -- accounting lives in journal_entries/entry_lines (see 0001). Every payment

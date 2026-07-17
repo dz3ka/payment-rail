@@ -17,7 +17,7 @@ import (
 )
 
 // TestSQLStoreIntegration exercises the real *sql.DB-backed SQLStore against a
-// live Postgres (skipped unless CONDUIT_TEST_DSN is set). It proves the two
+// live Postgres (skipped unless PAYMENT_RAIL_TEST_DSN is set). It proves the two
 // things the transaction seam exists for: a successful PostEntry COMMITs and
 // moves balances, and a rejected one (insufficient funds) ROLLs BACK, leaving
 // balances untouched.
@@ -27,9 +27,9 @@ import (
 // entry_line for it via raw SQL (the same shape the fake's seedAccount uses).
 // From there we post a normal balanced transfer through the Service.
 func TestSQLStoreIntegration(t *testing.T) {
-	dsn := os.Getenv("CONDUIT_TEST_DSN")
+	dsn := os.Getenv("PAYMENT_RAIL_TEST_DSN")
 	if dsn == "" {
-		t.Skip("set CONDUIT_TEST_DSN to run the SQLStore integration test")
+		t.Skip("set PAYMENT_RAIL_TEST_DSN to run the SQLStore integration test")
 	}
 
 	ctx := context.Background()

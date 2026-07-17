@@ -4,7 +4,7 @@
 // - protoc             (unknown)
 // source: signer.proto
 
-// Package conduit.signer.v1 defines the isolated signer service contract.
+// Package paymentrail.signer.v1 defines the isolated signer service contract.
 //
 // Amount fields (value, max_fee_per_gas, max_priority_fee_per_gas) are uint256
 // encoded as big-endian bytes of at most 32 bytes. Bytes are the canonical wire
@@ -27,7 +27,7 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	SignerService_SignTransaction_FullMethodName = "/conduit.signer.v1.SignerService/SignTransaction"
+	SignerService_SignTransaction_FullMethodName = "/paymentrail.signer.v1.SignerService/SignTransaction"
 )
 
 // SignerServiceClient is the client API for SignerService service.
@@ -124,7 +124,7 @@ func _SignerService_SignTransaction_Handler(srv interface{}, ctx context.Context
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
 var SignerService_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "conduit.signer.v1.SignerService",
+	ServiceName: "paymentrail.signer.v1.SignerService",
 	HandlerType: (*SignerServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{

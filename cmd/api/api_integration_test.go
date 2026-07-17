@@ -22,15 +22,15 @@ import (
 )
 
 // These e2e tests drive the real mux and payments service over HTTP against a
-// live Postgres, skipped unless CONDUIT_TEST_DSN is set (so `go test ./...`
+// live Postgres, skipped unless PAYMENT_RAIL_TEST_DSN is set (so `go test ./...`
 // stays green without a database). They run on the shared dev DB, so every
 // fixture uses fresh uuids and asserts on its own rows, never global state.
 
 func openTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	dsn := os.Getenv("CONDUIT_TEST_DSN")
+	dsn := os.Getenv("PAYMENT_RAIL_TEST_DSN")
 	if dsn == "" {
-		t.Skip("set CONDUIT_TEST_DSN to run the api e2e tests")
+		t.Skip("set PAYMENT_RAIL_TEST_DSN to run the api e2e tests")
 	}
 	sqlDB, err := sql.Open("postgres", dsn)
 	if err != nil {

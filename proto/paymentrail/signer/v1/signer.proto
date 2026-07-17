@@ -1,13 +1,13 @@
 syntax = "proto3";
 
-// Package conduit.signer.v1 defines the isolated signer service contract.
+// Package paymentrail.signer.v1 defines the isolated signer service contract.
 //
 // Amount fields (value, max_fee_per_gas, max_priority_fee_per_gas) are uint256
 // encoded as big-endian bytes of at most 32 bytes. Bytes are the canonical wire
 // form for uint256 at this trust boundary: there is no decimal-string parsing to
 // disagree on, no locale, and no precision loss — the signer and its callers
 // interpret the exact same octets.
-package conduit.signer.v1;
+package paymentrail.signer.v1;
 
 option go_package = "github.com/dz3ka/payment-rail/internal/signerpb;signerpb";
 

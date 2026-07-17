@@ -1,20 +1,20 @@
-# Local development stack for Conduit. Not production configuration.
+# Local development stack for Payment Rail. Not production configuration.
 # Start with `make up`, stop with `make down`.
-name: conduit-dev
+name: payment-rail-dev
 
 services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: conduit
-      POSTGRES_PASSWORD: conduit
-      POSTGRES_DB: conduit
+      POSTGRES_USER: payment_rail
+      POSTGRES_PASSWORD: payment_rail
+      POSTGRES_DB: payment_rail
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U conduit -d conduit"]
+      test: ["CMD-SHELL", "pg_isready -U payment_rail -d payment_rail"]
       interval: 5s
       timeout: 3s
       retries: 10

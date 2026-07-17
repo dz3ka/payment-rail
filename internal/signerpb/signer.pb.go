@@ -4,7 +4,7 @@
 // 	protoc        (unknown)
 // source: signer.proto
 
-// Package conduit.signer.v1 defines the isolated signer service contract.
+// Package paymentrail.signer.v1 defines the isolated signer service contract.
 //
 // Amount fields (value, max_fee_per_gas, max_priority_fee_per_gas) are uint256
 // encoded as big-endian bytes of at most 32 bytes. Bytes are the canonical wire
@@ -213,7 +213,7 @@ var File_signer_proto protoreflect.FileDescriptor
 
 const file_signer_proto_rawDesc = "" +
 	"\n" +
-	"\fsigner.proto\x12\x11conduit.signer.v1\"\x96\x02\n" +
+	"\fsigner.proto\x12\x15paymentrail.signer.v1\"\x96\x02\n" +
 	"\x16SignTransactionRequest\x12\x15\n" +
 	"\x06key_id\x18\x01 \x01(\tR\x05keyId\x12\x19\n" +
 	"\bchain_id\x18\x02 \x01(\x04R\achainId\x12\x14\n" +
@@ -227,9 +227,9 @@ const file_signer_proto_rawDesc = "" +
 	"\x17SignTransactionResponse\x12'\n" +
 	"\x0fraw_transaction\x18\x01 \x01(\fR\x0erawTransaction\x12\x17\n" +
 	"\atx_hash\x18\x02 \x01(\fR\x06txHash\x12\x12\n" +
-	"\x04from\x18\x03 \x01(\tR\x04from2y\n" +
-	"\rSignerService\x12h\n" +
-	"\x0fSignTransaction\x12).conduit.signer.v1.SignTransactionRequest\x1a*.conduit.signer.v1.SignTransactionResponseB:Z8github.com/dz3ka/payment-rail/internal/signerpb;signerpbb\x06proto3"
+	"\x04from\x18\x03 \x01(\tR\x04from2\x81\x01\n" +
+	"\rSignerService\x12p\n" +
+	"\x0fSignTransaction\x12-.paymentrail.signer.v1.SignTransactionRequest\x1a..paymentrail.signer.v1.SignTransactionResponseB:Z8github.com/dz3ka/payment-rail/internal/signerpb;signerpbb\x06proto3"
 
 var (
 	file_signer_proto_rawDescOnce sync.Once
@@ -245,12 +245,12 @@ func file_signer_proto_rawDescGZIP() []byte {
 
 var file_signer_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
 var file_signer_proto_goTypes = []any{
-	(*SignTransactionRequest)(nil),  // 0: conduit.signer.v1.SignTransactionRequest
-	(*SignTransactionResponse)(nil), // 1: conduit.signer.v1.SignTransactionResponse
+	(*SignTransactionRequest)(nil),  // 0: paymentrail.signer.v1.SignTransactionRequest
+	(*SignTransactionResponse)(nil), // 1: paymentrail.signer.v1.SignTransactionResponse
 }
 var file_signer_proto_depIdxs = []int32{
-	0, // 0: conduit.signer.v1.SignerService.SignTransaction:input_type -> conduit.signer.v1.SignTransactionRequest
-	1, // 1: conduit.signer.v1.SignerService.SignTransaction:output_type -> conduit.signer.v1.SignTransactionResponse
+	0, // 0: paymentrail.signer.v1.SignerService.SignTransaction:input_type -> paymentrail.signer.v1.SignTransactionRequest
+	1, // 1: paymentrail.signer.v1.SignerService.SignTransaction:output_type -> paymentrail.signer.v1.SignTransactionResponse
 	1, // [1:2] is the sub-list for method output_type
 	0, // [0:1] is the sub-list for method input_type
 	0, // [0:0] is the sub-list for extension type_name

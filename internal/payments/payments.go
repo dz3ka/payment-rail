@@ -1,4 +1,4 @@
-// Package payments is Conduit's API-facing money-movement service. It turns a
+// Package payments is Payment Rail's API-facing money-movement service. It turns a
 // request to move value into an atomic pair of writes — one balanced journal
 // entry in the ledger plus one payments row that records it — and it undoes a
 // payment the same way, posting a reversing entry alongside the status flip.

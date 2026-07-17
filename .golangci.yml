@@ -1,4 +1,4 @@
-# golangci-lint configuration for Conduit. Kept deliberately mainstream so it
+# golangci-lint configuration for Payment Rail. Kept deliberately mainstream so it
 # stays green across contributors; tighten as the codebase grows.
 run:
   timeout: 5m

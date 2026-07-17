@@ -1,22 +1,22 @@
 # C4 — Level 2: Containers
 
-The runnable pieces of Conduit and the stores/rails they talk to. Each container
+The runnable pieces of Payment Rail and the stores/rails they talk to. Each container
 is a separate binary under `cmd/`.
 
 ```mermaid
 C4Container
-    title Container Diagram — Conduit
+    title Container Diagram — Payment Rail
 
     Person(platformEng, "Platform engineer", "REST + events")
     Person(opsUser, "Ops operator", "CLI")
 
-    System_Boundary(conduit, "Conduit") {
+    System_Boundary(paymentrail, "Payment Rail") {
         Container(api, "api", "Go, REST", "Idempotent payments API; orchestrates the payment saga")
         Container(ledger, "ledger", "Go, gRPC", "Double-entry ledger; serializable journal transactions")
         Container(signer, "signer", "Go, gRPC", "Network-isolated key holder; per-key spend limits")
         Container(chainwatcher, "chainwatcher", "Go", "Per-chain confirmation tracking; reorg-safe finality")
         Container(webhookd, "webhookd", "Go", "Signed webhook delivery; backoff + dead-letter")
-        Container(ctl, "conduitctl", "Go, CLI", "Operator tooling")
+        Container(ctl, "paymentrailctl", "Go, CLI", "Operator tooling")
     }
 
     ContainerDb(pg, "PostgreSQL", "Ledger + transactional outbox + idempotency store")

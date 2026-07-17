@@ -6,7 +6,7 @@
 
 ## Context
 
-Conduit emits domain events through a transactional outbox onto a Kafka-API bus.
+Payment Rail emits domain events through a transactional outbox onto a Kafka-API bus.
 For local development and CI we need a broker that is Kafka-wire-compatible but
 light enough to run on a laptop-class machine alongside Postgres and an OTel
 collector. A full Kafka + ZooKeeper/KRaft cluster is heavy for that purpose.

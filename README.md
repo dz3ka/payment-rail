@@ -1,10 +1,10 @@
-# Conduit
+# Payment Rail
 
 **Stablecoin payment orchestration rail** — a self-hostable service that treats
 blockchains as unreliable settlement rails behind a boring, correct, auditable
 payments API. *Traditional business in the front, crypto rails in the back.*
 
-> ⚠️ **Portfolio & learning project.** Conduit handles **testnet funds only** and
+> ⚠️ **Portfolio & learning project.** Payment Rail handles **testnet funds only** and
 > is **not audited**. Its purpose is to demonstrate payments-grade engineering —
 > idempotency, double-entry accounting, reorg-safe settlement tracking, and
 > compliance-aware design. Do not point it at mainnet or real funds.
@@ -33,7 +33,7 @@ Kafka (Redpanda in dev) carries domain events from M4 on.
 | `signer` | Network-isolated key holder; signs well-formed payloads only |
 | `chainwatcher` | Per-chain confirmation tracking; reorg-safe finality |
 | `webhookd` | Signed webhook delivery with backoff and dead-lettering |
-| `conduitctl` | Operator CLI |
+| `paymentrailctl` | Operator CLI |
 
 See [`docs/architecture/`](docs/architecture/) for the C4 diagrams and
 [`docs/adr/`](docs/adr/) for the decision records.

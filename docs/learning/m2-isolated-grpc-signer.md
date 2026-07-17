@@ -17,7 +17,7 @@
 ## 1. What we built
 
 M2 slice 1 splits signing into its own process. `cmd/signer` is a gRPC server exposing
-one method, `SignTransaction`, defined by `proto/conduit/signer/v1/signer.proto`. A
+one method, `SignTransaction`, defined by `proto/paymentrail/signer/v1/signer.proto`. A
 caller hands over a fully-specified EIP-1559 transaction (key id, chain, nonce, gas,
 destination, amounts, calldata) and receives back the broadcast-ready RLP bytes, the
 transaction hash, and the recovered sender. Private key material never crosses the wire

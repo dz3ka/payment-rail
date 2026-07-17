@@ -8,7 +8,7 @@
 
 ## Context
 
-Conduit is a multi-service payment system (api, ledger, signer, chainwatcher,
+Payment Rail is a multi-service payment system (api, ledger, signer, chainwatcher,
 webhookd) plus an operator CLI. Every arrow in the payment flow is a failure
 boundary, and the signer must be isolatable from the rest of the system. We need
 a repository structure and inter-service transport that make those boundaries

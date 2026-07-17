@@ -1,4 +1,4 @@
-// Command conduitctl is the operator CLI: submit test payments, replay
+// Command paymentrailctl is the operator CLI: submit test payments, replay
 // webhooks, trigger reconciliation, and inspect the ledger.
 //
 // M0: prints version and usage only. Real subcommands are added alongside the
@@ -29,10 +29,10 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, `conduitctl — Conduit operator CLI (%s)
+	fmt.Fprintf(os.Stderr, `paymentrailctl — Payment Rail operator CLI (%s)
 
 Usage:
-  conduitctl [flags] <command>
+  paymentrailctl [flags] <command>
 
 Flags:
   --version    print version and exit

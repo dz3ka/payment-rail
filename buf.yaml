@@ -1,14 +1,14 @@
 version: v2
 # Module root is the proto's own directory so that `paths=source_relative`
 # codegen lands flat in internal/signerpb/ (matching the go_package
-# `.../internal/signerpb;signerpb`), not nested under conduit/signer/v1/.
+# `.../internal/signerpb;signerpb`), not nested under paymentrail/signer/v1/.
 modules:
-  - path: proto/conduit/signer/v1
+  - path: proto/paymentrail/signer/v1
 lint:
   use:
     - STANDARD
-  # The package is conduit.signer.v1 but the module root is that same
-  # directory, so the file sits at the root rather than under conduit/signer/v1.
+  # The package is paymentrail.signer.v1 but the module root is that same
+  # directory, so the file sits at the root rather than under paymentrail/signer/v1.
   except:
     - PACKAGE_DIRECTORY_MATCH
 breaking:

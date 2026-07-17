@@ -1,4 +1,4 @@
-// Package signer is Conduit's isolated transaction-signing domain. It holds
+// Package signer is Payment Rail's isolated transaction-signing domain. It holds
 // private keys, signs only well-formed EIP-1559 (dynamic-fee) transactions whose
 // calldata matches a strict allowlist, and enforces a per-key cumulative spend
 // limit — all with no knowledge of the wire protocol. The gRPC adapter (a

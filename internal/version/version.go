@@ -1,4 +1,4 @@
-// Package version exposes build metadata for Conduit binaries.
+// Package version exposes build metadata for Payment Rail binaries.
 //
 // The exported vars are overridden at link time via -ldflags (see the
 // Makefile's LDFLAGS). At `go run` / test time they keep their dev defaults.
