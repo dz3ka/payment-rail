@@ -15,7 +15,7 @@ import (
 )
 
 func main() {
-	service.Run("webhookd", func(ctx context.Context, cfg config.Config, log *slog.Logger) error {
+	service.Run("webhookd", func(ctx context.Context, _ config.Config, log *slog.Logger) error {
 		log.Info("webhookd ready (M0 skeleton: no delivery yet)")
 		<-ctx.Done()
 		return nil

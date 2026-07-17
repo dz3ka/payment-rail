@@ -12,6 +12,8 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("CONDUIT_LOG_LEVEL", "")
 	t.Setenv("CONDUIT_SHUTDOWN_TIMEOUT_SECONDS", "")
 	t.Setenv("CONDUIT_POSTGRES_DSN", "")
+	t.Setenv("CONDUIT_SIGNER_GRPC_ADDR", "")
+	t.Setenv("CONDUIT_SIGNER_KEYRING", "")
 
 	cfg, err := Load()
 	if err != nil {
@@ -30,12 +32,20 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.DatabaseURL != wantDSN {
 		t.Errorf("DatabaseURL = %q, want %q", cfg.DatabaseURL, wantDSN)
 	}
+	if cfg.SignerGRPCAddr != "127.0.0.1:9090" {
+		t.Errorf("SignerGRPCAddr = %q, want %q", cfg.SignerGRPCAddr, "127.0.0.1:9090")
+	}
+	if cfg.SignerKeyring != "signer.keyring.json" {
+		t.Errorf("SignerKeyring = %q, want %q", cfg.SignerKeyring, "signer.keyring.json")
+	}
 }
 
 func TestLoadOverrides(t *testing.T) {
 	t.Setenv("CONDUIT_ENV", "prod")
 	t.Setenv("CONDUIT_SHUTDOWN_TIMEOUT_SECONDS", "30")
 	t.Setenv("CONDUIT_POSTGRES_DSN", "postgres://user:pass@db:5432/other?sslmode=require")
+	t.Setenv("CONDUIT_SIGNER_GRPC_ADDR", "0.0.0.0:7000")
+	t.Setenv("CONDUIT_SIGNER_KEYRING", "/etc/conduit/keys.json")
 
 	cfg, err := Load()
 	if err != nil {
@@ -50,6 +60,12 @@ func TestLoadOverrides(t *testing.T) {
 	wantDSN := "postgres://user:pass@db:5432/other?sslmode=require"
 	if cfg.DatabaseURL != wantDSN {
 		t.Errorf("DatabaseURL = %q, want %q", cfg.DatabaseURL, wantDSN)
+	}
+	if cfg.SignerGRPCAddr != "0.0.0.0:7000" {
+		t.Errorf("SignerGRPCAddr = %q, want %q", cfg.SignerGRPCAddr, "0.0.0.0:7000")
+	}
+	if cfg.SignerKeyring != "/etc/conduit/keys.json" {
+		t.Errorf("SignerKeyring = %q, want %q", cfg.SignerKeyring, "/etc/conduit/keys.json")
 	}
 }
 

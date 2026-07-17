@@ -14,7 +14,7 @@ import (
 )
 
 func main() {
-	service.Run("ledger", func(ctx context.Context, cfg config.Config, log *slog.Logger) error {
+	service.Run("ledger", func(ctx context.Context, _ config.Config, log *slog.Logger) error {
 		log.Info("ledger ready (M0 skeleton: no journal yet)")
 		<-ctx.Done()
 		return nil

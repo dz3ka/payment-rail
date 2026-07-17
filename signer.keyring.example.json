@@ -1,0 +1,14 @@
+[
+  {
+    "key_id": "hot-1",
+    "key_file": "keys/hot-1.key",
+    "chain_id": 1,
+    "spend_limit": "1000000000000000000"
+  },
+  {
+    "key_id": "hot-2",
+    "key_file": "keys/hot-2.key",
+    "chain_id": 137,
+    "spend_limit": "5000000000000000000"
+  }
+]

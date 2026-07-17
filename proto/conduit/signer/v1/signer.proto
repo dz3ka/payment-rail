@@ -1,0 +1,49 @@
+syntax = "proto3";
+
+// Package conduit.signer.v1 defines the isolated signer service contract.
+//
+// Amount fields (value, max_fee_per_gas, max_priority_fee_per_gas) are uint256
+// encoded as big-endian bytes of at most 32 bytes. Bytes are the canonical wire
+// form for uint256 at this trust boundary: there is no decimal-string parsing to
+// disagree on, no locale, and no precision loss — the signer and its callers
+// interpret the exact same octets.
+package conduit.signer.v1;
+
+option go_package = "github.com/dz3ka/payment-rail/internal/signerpb;signerpb";
+
+// SignerService signs EIP-1559 transactions with a key held only inside the
+// signer process. Callers never see private key material; they hand over a
+// fully-specified transaction and receive the signed bytes.
+service SignerService {
+  rpc SignTransaction(SignTransactionRequest) returns (SignTransactionResponse);
+}
+
+message SignTransactionRequest {
+  // key_id selects which signing key to use inside the signer.
+  string key_id = 1;
+  // chain_id is the EIP-155 chain identifier the transaction targets.
+  uint64 chain_id = 2;
+  // nonce is the sender account nonce for this transaction.
+  uint64 nonce = 3;
+  // to is the 20-byte destination address.
+  bytes to = 4;
+  // value is the transfer amount: uint256 big-endian, <=32 bytes.
+  bytes value = 5;
+  // gas_limit is the maximum gas units the transaction may consume.
+  uint64 gas_limit = 6;
+  // max_fee_per_gas is the EIP-1559 fee cap: uint256 big-endian, <=32 bytes.
+  bytes max_fee_per_gas = 7;
+  // max_priority_fee_per_gas is the EIP-1559 tip cap: uint256 big-endian, <=32 bytes.
+  bytes max_priority_fee_per_gas = 8;
+  // data is the transaction calldata.
+  bytes data = 9;
+}
+
+message SignTransactionResponse {
+  // raw_transaction is the RLP-encoded signed transaction ready to broadcast.
+  bytes raw_transaction = 1;
+  // tx_hash is the keccak256 hash of the signed transaction.
+  bytes tx_hash = 2;
+  // from is the 0x-prefixed EIP-55 checksummed sender address.
+  string from = 3;
+}

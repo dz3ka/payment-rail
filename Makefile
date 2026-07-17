@@ -12,7 +12,7 @@ LDFLAGS    := -s -w \
 	-X '$(VPKG).Commit=$(COMMIT)' \
 	-X '$(VPKG).BuildDate=$(BUILD_DATE)'
 
-.PHONY: all build test cover vet lint tidy sqlc up down clean $(BINARIES)
+.PHONY: all build test cover vet lint tidy sqlc proto up down clean $(BINARIES)
 
 all: build
 
@@ -46,6 +46,10 @@ tidy:
 ## sqlc: regenerate the typed db package from db/migrations + db/query
 sqlc:
 	sqlc generate
+
+## proto: regenerate the gRPC signer stubs from proto/ (buf + plugins via go tool)
+proto:
+	go tool buf generate
 
 ## up: start the local dev stack (Postgres, Redpanda, OTel Collector)
 up:

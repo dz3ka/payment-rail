@@ -41,9 +41,15 @@ Numbering is sequential (`NNNN-kebab-title.md`). Status is one of:
 | [0005](0005-idempotency-key-store.md) | Idempotency-key store for the payments API | Accepted |
 | [0006](0006-in-process-ledger-transport-m1.md) | In-process ledger transport for M1 (supersedes 0001 for M1) | Accepted |
 | [0007](0007-payment-ledger-tx-composition.md) | Payment → ledger tx composition & reversing-entry cancel | Accepted |
+| [0008](0008-proto-toolchain-buf.md) | Proto toolchain (buf via Go tool directives) | Accepted |
+| [0009](0009-signer-key-custody-and-spend-limits.md) | Signer key custody & per-key spend limits | Accepted |
 
 ### Planned (not yet written)
 
-- ADR-0008 — Transactional outbox & event schema (M4)
-- ADR-0009 — Fake-chain test harness for scripted reorgs (M3)
-- ADR-0010 — Signer trust boundary & key custody path (HSM/MPC) (M2)
+Numbers 0008/0009 were reassigned to the signer ADRs above; the entries below are
+renumbered to the next free slots.
+
+- ADR-0010 — Transactional outbox & event schema (M4) — *renumbered from 0008*
+- ADR-0011 — Fake-chain test harness for scripted reorgs (M3) — *renumbered from 0009*
+- ADR-0012 — Signer HSM/MPC custody upgrade & mTLS caller auth (M2+) — *follow-up to
+  ADR-0009 (base custody now decided there); renumbered from 0010*

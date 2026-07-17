@@ -15,7 +15,7 @@ import (
 )
 
 func main() {
-	service.Run("chainwatcher", func(ctx context.Context, cfg config.Config, log *slog.Logger) error {
+	service.Run("chainwatcher", func(ctx context.Context, _ config.Config, log *slog.Logger) error {
 		log.Info("chainwatcher ready (M0 skeleton: watching no chains yet)")
 		<-ctx.Done()
 		return nil

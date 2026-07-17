@@ -1,0 +1,10 @@
+version: v2
+# Plugins run through the Go toolchain (go.mod `tool` directives), so codegen
+# needs only `go` on PATH — no system protoc, no PATH-installed or remote plugins.
+plugins:
+  - local: [go, tool, protoc-gen-go]
+    out: internal/signerpb
+    opt: paths=source_relative
+  - local: [go, tool, protoc-gen-go-grpc]
+    out: internal/signerpb
+    opt: paths=source_relative

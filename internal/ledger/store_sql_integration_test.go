@@ -59,14 +59,14 @@ func TestSQLStoreIntegration(t *testing.T) {
 	}
 
 	// A brand-new account has a derived balance of 0.
-	if bal := mustBalance(t, ctx, q, dst.ID); bal != 0 {
+	if bal := mustBalance(ctx, t, q, dst.ID); bal != 0 {
 		t.Fatalf("fresh dest balance = %d, want 0", bal)
 	}
 
 	// Seed the source with 1000 via a raw opening credit (test-only).
 	const opening = 1000
-	seedOpeningBalance(t, ctx, sqlDB, asset, src.ID, opening)
-	if bal := mustBalance(t, ctx, q, src.ID); bal != opening {
+	seedOpeningBalance(ctx, t, sqlDB, asset, src.ID, opening)
+	if bal := mustBalance(ctx, t, q, src.ID); bal != opening {
 		t.Fatalf("seeded source balance = %d, want %d", bal, opening)
 	}
 
@@ -83,18 +83,18 @@ func TestSQLStoreIntegration(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("PostEntry(transfer): %v", err)
 	}
-	if bal := mustBalance(t, ctx, q, src.ID); bal != opening-transfer {
+	if bal := mustBalance(ctx, t, q, src.ID); bal != opening-transfer {
 		t.Errorf("source balance after transfer = %d, want %d", bal, opening-transfer)
 	}
-	if bal := mustBalance(t, ctx, q, dst.ID); bal != transfer {
+	if bal := mustBalance(ctx, t, q, dst.ID); bal != transfer {
 		t.Errorf("dest balance after transfer = %d, want %d", bal, transfer)
 	}
 
 	// Rollback path: over-draw the source. PostEntry must reject with
 	// ErrInsufficientFunds AND leave balances exactly as they were — proving the
 	// SQLStore rolled the transaction back rather than committing a partial write.
-	srcBefore := mustBalance(t, ctx, q, src.ID)
-	dstBefore := mustBalance(t, ctx, q, dst.ID)
+	srcBefore := mustBalance(ctx, t, q, src.ID)
+	dstBefore := mustBalance(ctx, t, q, dst.ID)
 	_, err = svc.PostEntry(ctx, ledger.Entry{
 		Kind:        "transfer",
 		ExternalRef: uuid.NewString(),
@@ -107,10 +107,10 @@ func TestSQLStoreIntegration(t *testing.T) {
 	if !errors.Is(err, ledger.ErrInsufficientFunds) {
 		t.Fatalf("over-draw error = %v, want ErrInsufficientFunds", err)
 	}
-	if bal := mustBalance(t, ctx, q, src.ID); bal != srcBefore {
+	if bal := mustBalance(ctx, t, q, src.ID); bal != srcBefore {
 		t.Errorf("source balance after rejected posting = %d, want unchanged %d", bal, srcBefore)
 	}
-	if bal := mustBalance(t, ctx, q, dst.ID); bal != dstBefore {
+	if bal := mustBalance(ctx, t, q, dst.ID); bal != dstBefore {
 		t.Errorf("dest balance after rejected posting = %d, want unchanged %d", bal, dstBefore)
 	}
 }
@@ -120,7 +120,7 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-func mustBalance(t *testing.T, ctx context.Context, q *db.Queries, id uuid.UUID) int64 {
+func mustBalance(ctx context.Context, t *testing.T, q *db.Queries, id uuid.UUID) int64 {
 	t.Helper()
 	bal, err := q.GetAccountBalance(ctx, id)
 	if err != nil {
@@ -133,7 +133,7 @@ func mustBalance(t *testing.T, ctx context.Context, q *db.Queries, id uuid.UUID)
 // entry and a single credit line for it, straight through the pool. This is a
 // test-only shortcut for "money enters the system"; production seeds go through
 // the payments/minting flow, not raw inserts.
-func seedOpeningBalance(t *testing.T, ctx context.Context, sqlDB *sql.DB, asset string, id uuid.UUID, amount int64) {
+func seedOpeningBalance(ctx context.Context, t *testing.T, sqlDB *sql.DB, asset string, id uuid.UUID, amount int64) {
 	t.Helper()
 	var entryID uuid.UUID
 	if err := sqlDB.QueryRowContext(ctx,

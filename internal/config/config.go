@@ -16,6 +16,10 @@ type Config struct {
 	LogLevel        string        // "debug" | "info" | "warn" | "error"
 	ShutdownTimeout time.Duration // graceful-shutdown budget per service
 	DatabaseURL     string        // Postgres DSN (lib/pq URL form) for the ledger store
+	// SignerGRPCAddr defaults to loopback on purpose: slice-1 has no
+	// mTLS/caller-auth yet, so the signer must not bind a public interface.
+	SignerGRPCAddr string // listen/dial addr for the isolated gRPC signer
+	SignerKeyring  string // filesystem path to the signer's key manifest
 }
 
 // Load reads configuration from environment variables, applying documented
@@ -27,6 +31,8 @@ func Load() (Config, error) {
 		LogLevel:        getEnv("CONDUIT_LOG_LEVEL", "info"),
 		ShutdownTimeout: 10 * time.Second,
 		DatabaseURL:     getEnv("CONDUIT_POSTGRES_DSN", "postgres://conduit:conduit@localhost:5432/conduit?sslmode=disable"),
+		SignerGRPCAddr:  getEnv("CONDUIT_SIGNER_GRPC_ADDR", "127.0.0.1:9090"),
+		SignerKeyring:   getEnv("CONDUIT_SIGNER_KEYRING", "signer.keyring.json"),
 	}
 
 	if v := os.Getenv("CONDUIT_SHUTDOWN_TIMEOUT_SECONDS"); v != "" {
