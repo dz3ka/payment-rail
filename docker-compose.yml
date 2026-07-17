@@ -1,0 +1,53 @@
+# Local development stack for Conduit. Not production configuration.
+# Start with `make up`, stop with `make down`.
+name: conduit-dev
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: conduit
+      POSTGRES_PASSWORD: conduit
+      POSTGRES_DB: conduit
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U conduit -d conduit"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Redpanda: Kafka-API-compatible broker, far lighter than Kafka+ZooKeeper for
+  # local dev (see docs/adr/0003-local-dev-messaging-redpanda.md).
+  redpanda:
+    image: redpandadata/redpanda:v24.2.7
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --overprovisioned
+      - --node-id=0
+      - --kafka-addr=INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:19092
+      - --advertise-kafka-addr=INTERNAL://redpanda:29092,EXTERNAL://localhost:19092
+    ports:
+      - "19092:19092" # Kafka API (host)
+      - "9644:9644"   # Admin/metrics
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.109.0
+    command: ["--config=/etc/otel-collector.yaml"]
+    volumes:
+      - ./deploy/otel-collector.yaml:/etc/otel-collector.yaml:ro
+    ports:
+      - "4317:4317" # OTLP gRPC
+      - "4318:4318" # OTLP HTTP
+
+volumes:
+  pgdata:

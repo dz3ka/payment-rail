@@ -1,0 +1,38 @@
+# golangci-lint configuration for Conduit. Kept deliberately mainstream so it
+# stays green across contributors; tighten as the codebase grows.
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  enable:
+    - errcheck      # unchecked errors
+    - govet         # suspicious constructs
+    - ineffassign   # unused assignments
+    - staticcheck   # broad correctness/style analysis
+    - unused        # unused code
+    - gofmt         # formatting
+    - goimports     # import grouping/ordering
+    - misspell      # common misspellings
+    - revive        # golint successor
+    - errorlint     # %w / errors.Is/As correctness
+    - bodyclose     # http response bodies closed
+
+linters-settings:
+  errcheck:
+    # Writes to stdout/stderr in CLI help/usage paths are intentionally
+    # unchecked; failing to print usage is not an actionable error.
+    exclude-functions:
+      - fmt.Print
+      - fmt.Printf
+      - fmt.Println
+      - fmt.Fprint
+      - fmt.Fprintf
+      - fmt.Fprintln
+
+issues:
+  exclude-rules:
+    # Test helpers frequently ignore errors on cleanup; don't nag.
+    - path: _test\.go
+      linters:
+        - errcheck

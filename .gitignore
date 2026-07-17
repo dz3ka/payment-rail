@@ -1,0 +1,24 @@
+# Compiled binaries
+/bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test & coverage output
+*.test
+*.out
+coverage.*
+
+# Local env / secrets — never commit real values
+.env
+.env.local
+*.pem
+*.key
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
