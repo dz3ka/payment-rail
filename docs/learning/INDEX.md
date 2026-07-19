@@ -10,5 +10,6 @@ weighed, and the mistakes avoided. This index links them in order.
 | M1 | [m1-double-entry-ledger.md](m1-double-entry-ledger.md) | Derived (never-stored) balances, `%w`/`errors.Is`/`errors.As` sentinels, and a fakeable `Store`/`Querier` transactor seam tested with no database |
 | M1 | [m1-payments-idempotency.md](m1-payments-idempotency.md) | Composing a payment + journal entry in one tx via a shared `Querier` (`PostWithin`), an idempotency middleware built on a buffering `http.ResponseWriter`, and stable keyset (cursor) pagination |
 | M2 | [m2-isolated-grpc-signer.md](m2-isolated-grpc-signer.md) | A pb-agnostic signing domain behind a proto↔domain gRPC adapter (sentinel→status mapping), a per-key `sync.Mutex` spend limiter with `{check→sign→commit}` as one critical section, defensive `deepCopy` of mutable `*big.Int`/slices at a key-holding trust boundary, and go-ethereum EIP-1559 signing |
+| M2 | [m2-evm-chain-adapter.md](m2-evm-chain-adapter.md) | A concurrency-safe, chain-authoritative nonce allocator holding one `sync.Mutex` across the whole `{query→sign→broadcast→advance}` section (high-water committed only on success → gap-free), a ports-and-adapters seam reaching across a process boundary (adapter owns its `evm.Signer`/`ethRPC` interfaces + DTOs; proto↔domain mapping lives alone in the composition root), `*big.Int` mutable-pointer discipline, and an overflow-safe gas buffer via `math/bits.Mul64` |
 
-_Lessons for M2–M7 are added as those milestones ship._
+_Lessons for M3–M7 are added as those milestones ship._

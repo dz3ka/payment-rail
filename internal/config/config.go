@@ -20,6 +20,17 @@ type Config struct {
 	// mTLS/caller-auth yet, so the signer must not bind a public interface.
 	SignerGRPCAddr string // listen/dial addr for the isolated gRPC signer
 	SignerKeyring  string // filesystem path to the signer's key manifest
+	// Chain adapter (M2): connection details and policy caps for the EVM payment
+	// driver. Addresses are plain strings here — the adapter validates them so
+	// config stays go-ethereum-free. ChainMaxFeePerGasCapWei is a decimal-wei
+	// string the driver parses to *big.Int, keeping config big.Int-free.
+	ChainRPCURL             string // JSON-RPC endpoint for the target chain
+	ChainID                 uint64 // EIP-155 chain id (default: Ethereum Sepolia)
+	ChainKeyID              string // signer key id that authorizes chain payments
+	ChainFromAddress        string // sender address the signer key controls
+	ChainUSDCAddress        string // USDC token contract address
+	ChainGasLimitCap        uint64 // reject intents needing more gas than this
+	ChainMaxFeePerGasCapWei string // max fee-per-gas cap, decimal wei
 }
 
 // Load reads configuration from environment variables, applying documented
@@ -33,6 +44,14 @@ func Load() (Config, error) {
 		DatabaseURL:     getEnv("PAYMENT_RAIL_POSTGRES_DSN", "postgres://payment_rail:payment_rail@localhost:5432/payment_rail?sslmode=disable"),
 		SignerGRPCAddr:  getEnv("PAYMENT_RAIL_SIGNER_GRPC_ADDR", "127.0.0.1:9090"),
 		SignerKeyring:   getEnv("PAYMENT_RAIL_SIGNER_KEYRING", "signer.keyring.json"),
+
+		ChainRPCURL:             getEnv("PAYMENT_RAIL_CHAIN_RPC_URL", ""),
+		ChainID:                 11155111,
+		ChainKeyID:              getEnv("PAYMENT_RAIL_CHAIN_KEY_ID", ""),
+		ChainFromAddress:        getEnv("PAYMENT_RAIL_CHAIN_FROM_ADDRESS", ""),
+		ChainUSDCAddress:        getEnv("PAYMENT_RAIL_CHAIN_USDC_ADDRESS", ""),
+		ChainGasLimitCap:        300000,
+		ChainMaxFeePerGasCapWei: getEnv("PAYMENT_RAIL_CHAIN_MAX_FEE_PER_GAS_CAP_WEI", "100000000000"),
 	}
 
 	if v := os.Getenv("PAYMENT_RAIL_SHUTDOWN_TIMEOUT_SECONDS"); v != "" {
@@ -41,6 +60,22 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("config: parse PAYMENT_RAIL_SHUTDOWN_TIMEOUT_SECONDS %q: %w", v, err)
 		}
 		cfg.ShutdownTimeout = time.Duration(secs) * time.Second
+	}
+
+	if v := os.Getenv("PAYMENT_RAIL_CHAIN_ID"); v != "" {
+		id, err := strconv.ParseUint(v, 10, 64)
+		if err != nil {
+			return Config{}, fmt.Errorf("config: parse PAYMENT_RAIL_CHAIN_ID %q: %w", v, err)
+		}
+		cfg.ChainID = id
+	}
+
+	if v := os.Getenv("PAYMENT_RAIL_CHAIN_GAS_LIMIT_CAP"); v != "" {
+		limit, err := strconv.ParseUint(v, 10, 64)
+		if err != nil {
+			return Config{}, fmt.Errorf("config: parse PAYMENT_RAIL_CHAIN_GAS_LIMIT_CAP %q: %w", v, err)
+		}
+		cfg.ChainGasLimitCap = limit
 	}
 
 	return cfg, nil

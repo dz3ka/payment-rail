@@ -11,12 +11,21 @@ payments API. *Traditional business in the front, crypto rails in the back.*
 
 ## Status
 
-Milestone **M1 — ledger + payments API** (this cut): a double-entry ledger in
-Postgres with balances derived from history (never stored), and an idempotent
-REST payments API (`create`/`get`/`list`/`cancel`) that composes the payment and
-its journal entry in a single transaction. Concurrency safety (no overdraw under
-parallel writes) is proven under the race detector against live Postgres. See the
-[ADRs](docs/adr/) 0004–0007 for the decisions behind it.
+Milestone **M2 — signer + EVM chain adapter** (this cut). Building on M1's
+double-entry ledger and idempotent REST payments API (`create`/`get`/`list`/
+`cancel`, balances derived from history, one-transaction payment+journal, proven
+race-free against live Postgres), M2 adds two isolated pieces:
+
+- **Signer** (slice 1): a network-isolated gRPC service that holds keys and signs
+  only well-formed EIP-1559 payloads under a per-key spend cap (ADR-0009).
+- **EVM chain adapter** (slice 2): a chain-neutral `chain.Adapter` port + an EVM
+  implementation that builds ERC-20 USDC transfers, allocates the
+  chain-authoritative nonce concurrency-safely, estimates gas under configurable
+  caps, signs via the signer (holding no keys itself), and broadcasts to a testnet
+  node — driven by `paymentrailctl submit` and proven end-to-end against an
+  in-process EVM (ADR-0010).
+
+See the [ADRs](docs/adr/) 0004–0010 for the decisions behind it.
 
 ## Architecture at a glance
 
@@ -81,7 +90,7 @@ docs/
 |-----------|-------|
 | **M0** ✅ | Repo skeleton, CI, lint, dev stack, C4, first ADRs |
 | **M1** ✅ | Ledger service + payments API with idempotency |
-| M2 | Signer + EVM chain adapter (testnet submit) |
+| **M2** ✅ | Signer + EVM chain adapter (testnet submit) |
 | M3 | Chain-watcher with confirmations + reorg handling |
 | M4 | Outbox → Kafka + webhook dispatcher |
 | M5 | Policy engine + audit log |
