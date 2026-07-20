@@ -6,6 +6,7 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
@@ -45,6 +46,15 @@ type JournalEntry struct {
 	ExternalRef string
 	Asset       string
 	CreatedAt   time.Time
+}
+
+type Outbox struct {
+	ID          uuid.UUID
+	EventType   string
+	AggregateID string
+	Payload     json.RawMessage
+	CreatedAt   time.Time
+	SentAt      sql.NullTime
 }
 
 type Payment struct {

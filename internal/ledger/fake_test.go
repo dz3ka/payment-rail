@@ -237,3 +237,17 @@ func (q *fakeQuerier) MarkSettlementFinalized(context.Context, string) (db.Settl
 func (q *fakeQuerier) ListPendingSettlements(context.Context) ([]db.Settlement, error) {
 	panic("fakeQuerier.ListPendingSettlements: not used by the ledger domain")
 }
+
+// Outbox methods belong to the event relay (M4); the ledger domain never calls
+// them, so they panic like the settlement/payments stubs above.
+func (q *fakeQuerier) InsertOutboxEvent(context.Context, db.InsertOutboxEventParams) error {
+	panic("fakeQuerier.InsertOutboxEvent: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) ClaimUnsentOutbox(context.Context, int32) ([]db.Outbox, error) {
+	panic("fakeQuerier.ClaimUnsentOutbox: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) MarkOutboxSent(context.Context, []uuid.UUID) (int64, error) {
+	panic("fakeQuerier.MarkOutboxSent: not used by the ledger domain")
+}

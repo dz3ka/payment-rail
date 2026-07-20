@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -36,6 +37,12 @@ type Config struct {
 	// WatcherPollInterval is the cadence the watcher polls the node at.
 	WatcherConfirmations uint64        // confirmation depth threshold N (>= 1)
 	WatcherPollInterval  time.Duration // poll cadence
+	// Outbox relay (M4): transport + cadence for the outboxrelay service, which
+	// forwards committed outbox rows to Kafka. KafkaBrokers is the bootstrap broker
+	// list; OutboxPollInterval is how often the relay drains unsent rows. Topic and
+	// batch size stay as internal/outbox constants, not config.
+	KafkaBrokers       []string      // Kafka bootstrap brokers ("host:port,...")
+	OutboxPollInterval time.Duration // relay drain cadence
 }
 
 // Load reads configuration from environment variables, applying documented
@@ -60,6 +67,9 @@ func Load() (Config, error) {
 
 		WatcherConfirmations: 12,
 		WatcherPollInterval:  15 * time.Second,
+
+		KafkaBrokers:       splitBrokers(getEnv("PAYMENT_RAIL_KAFKA_BROKERS", "localhost:19092")),
+		OutboxPollInterval: 5 * time.Second,
 	}
 
 	if v := os.Getenv("PAYMENT_RAIL_SHUTDOWN_TIMEOUT_SECONDS"); v != "" {
@@ -102,7 +112,28 @@ func Load() (Config, error) {
 		cfg.WatcherPollInterval = time.Duration(secs) * time.Second
 	}
 
+	if v := os.Getenv("PAYMENT_RAIL_OUTBOX_POLL_INTERVAL_SECONDS"); v != "" {
+		secs, err := strconv.Atoi(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("config: parse PAYMENT_RAIL_OUTBOX_POLL_INTERVAL_SECONDS %q: %w", v, err)
+		}
+		cfg.OutboxPollInterval = time.Duration(secs) * time.Second
+	}
+
 	return cfg, nil
+}
+
+// splitBrokers turns a comma-separated broker list into a slice, trimming spaces
+// and dropping empty segments so "a:1, ,b:2," yields ["a:1", "b:2"].
+func splitBrokers(s string) []string {
+	parts := strings.Split(s, ",")
+	brokers := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			brokers = append(brokers, p)
+		}
+	}
+	return brokers
 }
 
 func getEnv(key, def string) string {

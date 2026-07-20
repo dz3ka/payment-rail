@@ -34,7 +34,19 @@ import (
 	"github.com/dz3ka/payment-rail/internal/chain/evm"
 	"github.com/dz3ka/payment-rail/internal/db"
 	"github.com/dz3ka/payment-rail/internal/ledger"
+	"github.com/dz3ka/payment-rail/internal/outbox"
 )
+
+// settlementEvent is the small, stable body carried in a settlement.* outbox
+// envelope's "data" field. It is keyed for consumers by tx_hash (the envelope's
+// aggregate_id) and payment_id; asset/amount are populated when the transition
+// resolved them (settle/reverse) and omitted when it did not (finalize).
+type settlementEvent struct {
+	PaymentID uuid.UUID `json:"payment_id"`
+	TxHash    string    `json:"tx_hash"`
+	Asset     string    `json:"asset,omitempty"`
+	Amount    int64     `json:"amount,omitempty"`
+}
 
 // houseAccountName is the well-known name of the clearing account every
 // settlement entry balances against — the counterparty that holds funds while
@@ -214,6 +226,19 @@ func (s *Sink) settle(ctx context.Context, q db.Querier, sett db.Settlement, pay
 		return fmt.Errorf("settlement: mark settled %s: %w", st.TxHash, err)
 	}
 
+	// Reached only when MarkSettlementSettled actually flipped the row (a
+	// redelivered confirm short-circuits at the status guard above, and a
+	// concurrent settle returns ErrNoRows), so this emits exactly once per real
+	// settlement, in the same tx. Keyed by tx_hash so every lifecycle event for
+	// this tx shares an aggregate id.
+	if err := outbox.Emit(ctx, q, outbox.Event{
+		Type:        "settlement.confirmed",
+		AggregateID: string(st.TxHash),
+		Data:        settlementEvent{PaymentID: sett.PaymentID, TxHash: string(st.TxHash), Asset: pay.Asset, Amount: pay.Amount},
+	}); err != nil {
+		return err
+	}
+
 	s.logResult(ctx, "settle", pay, st, nil)
 	return nil
 }
@@ -258,6 +283,17 @@ func (s *Sink) reverse(ctx context.Context, q db.Querier, sett db.Settlement, pa
 		return fmt.Errorf("settlement: mark reorged %s: %w", st.TxHash, err)
 	}
 
+	// Reached only when MarkSettlementReorged actually flipped a settled row (the
+	// status guard makes a redelivered reorg a no-op, and a concurrent reorg returns
+	// ErrNoRows), so this emits exactly once per real reversal, in the same tx.
+	if err := outbox.Emit(ctx, q, outbox.Event{
+		Type:        "settlement.reorged",
+		AggregateID: string(st.TxHash),
+		Data:        settlementEvent{PaymentID: sett.PaymentID, TxHash: string(st.TxHash), Asset: pay.Asset, Amount: pay.Amount},
+	}); err != nil {
+		return err
+	}
+
 	s.logResult(ctx, "reverse", pay, st, nil)
 	return nil
 }
@@ -288,7 +324,15 @@ func (s *Sink) finalize(ctx context.Context, st evm.Status) error {
 			"block_hash", st.BlockHash,
 			"status", sett.Status,
 		)
-		return nil
+		// Inside the row-updated branch only: a redelivered/no-longer-settled finalize
+		// returns ErrNoRows above and never reaches here, so this emits exactly once
+		// per real finalization, in the same tx. finalize resolves no payment, so the
+		// body carries tx_hash + payment_id (from the marked row) without asset/amount.
+		return outbox.Emit(ctx, q, outbox.Event{
+			Type:        "settlement.finalized",
+			AggregateID: txHash,
+			Data:        settlementEvent{PaymentID: sett.PaymentID, TxHash: txHash},
+		})
 	})
 }
 

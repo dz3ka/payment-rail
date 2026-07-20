@@ -40,6 +40,8 @@ type fakeQuerier struct {
 	seenRef     map[string]struct{}
 	payments    map[uuid.UUID]db.Payment
 	settlements map[string]db.Settlement // keyed by tx_hash
+	outbox      []db.InsertOutboxEventParams
+	outboxErr   error // when set, InsertOutboxEvent fails, aborting the tx
 	nextLine    int64
 }
 
@@ -334,6 +336,33 @@ func (q *fakeQuerier) DeleteExpiredIdempotencyKeys(context.Context, time.Time) (
 	panic("fakeQuerier.DeleteExpiredIdempotencyKeys: not used by the settlement domain")
 }
 
+// InsertOutboxEvent records the appended envelope so tests can assert the Sink
+// emits exactly one outbox row per real transition (and none on a no-op).
+func (q *fakeQuerier) InsertOutboxEvent(_ context.Context, arg db.InsertOutboxEventParams) error {
+	if q.outboxErr != nil {
+		return q.outboxErr
+	}
+	q.outbox = append(q.outbox, arg)
+	return nil
+}
+
+// outboxTypes returns the event_type of every recorded outbox row, in order.
+func (q *fakeQuerier) outboxTypes() []string {
+	types := make([]string, len(q.outbox))
+	for i, o := range q.outbox {
+		types[i] = o.EventType
+	}
+	return types
+}
+
+func (q *fakeQuerier) ClaimUnsentOutbox(context.Context, int32) ([]db.Outbox, error) {
+	panic("fakeQuerier.ClaimUnsentOutbox: not used by the settlement domain")
+}
+
+func (q *fakeQuerier) MarkOutboxSent(context.Context, []uuid.UUID) (int64, error) {
+	panic("fakeQuerier.MarkOutboxSent: not used by the settlement domain")
+}
+
 // --- fixtures ---------------------------------------------------------------
 
 const (
@@ -401,6 +430,13 @@ func TestOnStatus_Settle(t *testing.T) {
 	if !sett.SettleEntryID.Valid {
 		t.Error("settle_entry_id not set")
 	}
+	// Exactly one outbox row, keyed by tx_hash, describing the confirmation.
+	if got := f.q.outboxTypes(); len(got) != 1 || got[0] != "settlement.confirmed" {
+		t.Fatalf("outbox events = %v, want [settlement.confirmed]", got)
+	}
+	if got := f.q.outbox[0].AggregateID; got != txHash {
+		t.Errorf("outbox aggregate_id = %q, want tx hash %q", got, txHash)
+	}
 }
 
 //  2. Re-delivering the same Confirmed(A) is a no-op: no second entry, status
@@ -429,6 +465,10 @@ func TestOnStatus_SettleIdempotent(t *testing.T) {
 	if got := f.q.balance(f.house); got != amount {
 		t.Errorf("house balance = %d, want %d (unchanged)", got, amount)
 	}
+	// The redelivery is a no-op, so no second outbox row is appended.
+	if got := f.q.outboxTypes(); len(got) != 1 || got[0] != "settlement.confirmed" {
+		t.Errorf("outbox events = %v, want a single [settlement.confirmed]", got)
+	}
 }
 
 //  3. A reorged tx posts debit-house/credit-dest and flips the row to reorged;
@@ -453,6 +493,10 @@ func TestOnStatus_Reverse(t *testing.T) {
 	}
 	if got := f.q.settlements[txHash].Status; got != "reorged" {
 		t.Errorf("status = %q, want reorged", got)
+	}
+	// One event per real transition: confirm then reorg, both keyed by tx_hash.
+	if got := f.q.outboxTypes(); len(got) != 2 || got[0] != "settlement.confirmed" || got[1] != "settlement.reorged" {
+		t.Errorf("outbox events = %v, want [settlement.confirmed settlement.reorged]", got)
 	}
 }
 
@@ -520,6 +564,10 @@ func TestOnStatus_Finalize(t *testing.T) {
 	if got := f.q.entryCount(); got != entriesAfterSettle {
 		t.Errorf("entry count = %d, want %d (finalize posts no journal entry)", got, entriesAfterSettle)
 	}
+	// Finalize is a real transition, so it emits — one confirmed, one finalized.
+	if got := f.q.outboxTypes(); len(got) != 2 || got[0] != "settlement.confirmed" || got[1] != "settlement.finalized" {
+		t.Errorf("outbox events = %v, want [settlement.confirmed settlement.finalized]", got)
+	}
 }
 
 // Redelivering Finalized on an already-finalized row is a benign no-op: the
@@ -546,6 +594,10 @@ func TestOnStatus_FinalizeIdempotent(t *testing.T) {
 	}
 	if got := f.q.entryCount(); got != entriesAfterFirst {
 		t.Errorf("entry count = %d, want %d (no post on redelivery)", got, entriesAfterFirst)
+	}
+	// The redelivered finalize is a no-op, so no third outbox row is appended.
+	if got := f.q.outboxTypes(); len(got) != 2 || got[1] != "settlement.finalized" {
+		t.Errorf("outbox events = %v, want [settlement.confirmed settlement.finalized]", got)
 	}
 }
 
@@ -593,6 +645,27 @@ func TestOnStatus_InsufficientFunds(t *testing.T) {
 	}
 	if got := f.q.settlements[txHash].Status; got != "pending" {
 		t.Errorf("status = %q, want pending (settle rolled back)", got)
+	}
+	// The post failed before Emit, so no outbox row leaks from a rejected settle.
+	if got := f.q.outboxTypes(); len(got) != 0 {
+		t.Errorf("outbox events = %v, want none (settle rejected)", got)
+	}
+}
+
+// A failing InsertOutboxEvent aborts the settle: OnStatus surfaces the error, so
+// under a real transaction the settle_entry_id flip and the outbox row roll back
+// together — the event and the state change are one atomic write.
+func TestOnStatus_SettleOutboxErrorPropagates(t *testing.T) {
+	f := newFixture(t, amount)
+	f.q.outboxErr = errors.New("outbox insert failed")
+	sink := NewSink(f.store, nil)
+
+	err := sink.OnStatus(context.Background(), status(evm.PhaseConfirmed, blockA))
+	if !errors.Is(err, f.q.outboxErr) {
+		t.Fatalf("OnStatus err = %v, want the injected outbox error", err)
+	}
+	if got := len(f.q.outbox); got != 0 {
+		t.Errorf("recorded %d outbox rows, want 0 (insert failed)", got)
 	}
 }
 

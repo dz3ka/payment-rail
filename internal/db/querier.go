@@ -15,6 +15,9 @@ type Querier interface {
 	// Guarded on status = 'completed' so a concurrent or repeated cancel matches no
 	// row and the caller sees sql.ErrNoRows instead of double-reversing.
 	CancelPayment(ctx context.Context, arg CancelPaymentParams) (Payment, error)
+	// The relay's claim scan: oldest unsent rows first, FOR UPDATE SKIP LOCKED so
+	// concurrent relay workers each grab a disjoint batch without blocking.
+	ClaimUnsentOutbox(ctx context.Context, limit int32) ([]Outbox, error)
 	// Caches the response so subsequent retries of the same key replay it verbatim.
 	CompleteIdempotencyKey(ctx context.Context, arg CompleteIdempotencyKeyParams) error
 	CreateAccount(ctx context.Context, arg CreateAccountParams) (Account, error)
@@ -42,6 +45,9 @@ type Querier interface {
 	// request_hash/response rather than re-running the operation.
 	InsertIdempotencyKey(ctx context.Context, arg InsertIdempotencyKeyParams) (IdempotencyKey, error)
 	InsertJournalEntry(ctx context.Context, arg InsertJournalEntryParams) (JournalEntry, error)
+	// Appended in the same transaction as the aggregate write it describes, so the
+	// domain change and its intent-to-publish commit atomically.
+	InsertOutboxEvent(ctx context.Context, arg InsertOutboxEventParams) error
 	// Records a completed payment. status/created_at default appropriately; a
 	// canceled payment is only ever reached via CancelPayment, never inserted.
 	InsertPayment(ctx context.Context, arg InsertPaymentParams) (Payment, error)
@@ -64,6 +70,9 @@ type Querier interface {
 	// is terminal and deliberately excluded. Ordered by created_at so the watcher
 	// processes them oldest-first.
 	ListPendingSettlements(ctx context.Context) ([]Settlement, error)
+	// Stamps a claimed batch as published; ANY($1) marks the whole batch in one
+	// round-trip after Kafka acks.
+	MarkOutboxSent(ctx context.Context, dollar_1 []uuid.UUID) (int64, error)
 	// Guarded on status = 'settled' so only a settled tx can finalize; a reorged or
 	// still-pending tx matches no row. ErrNoRows here is an idempotent no-op for the
 	// caller (already finalized, or reorged out from under the promotion).
