@@ -23,6 +23,7 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("PAYMENT_RAIL_CHAIN_MAX_FEE_PER_GAS_CAP_WEI", "")
 	t.Setenv("PAYMENT_RAIL_WATCHER_CONFIRMATIONS", "")
 	t.Setenv("PAYMENT_RAIL_WATCHER_POLL_INTERVAL_SECONDS", "")
+	t.Setenv("PAYMENT_RAIL_POLICY_DENYLIST", "")
 
 	cfg, err := Load()
 	if err != nil {
@@ -74,6 +75,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.WatcherPollInterval != 15*time.Second {
 		t.Errorf("WatcherPollInterval = %v, want %v", cfg.WatcherPollInterval, 15*time.Second)
 	}
+	if cfg.PolicyDenylist != "" {
+		t.Errorf("PolicyDenylist = %q, want %q", cfg.PolicyDenylist, "")
+	}
 }
 
 func TestLoadOverrides(t *testing.T) {
@@ -91,6 +95,7 @@ func TestLoadOverrides(t *testing.T) {
 	t.Setenv("PAYMENT_RAIL_CHAIN_MAX_FEE_PER_GAS_CAP_WEI", "250000000000")
 	t.Setenv("PAYMENT_RAIL_WATCHER_CONFIRMATIONS", "6")
 	t.Setenv("PAYMENT_RAIL_WATCHER_POLL_INTERVAL_SECONDS", "3")
+	t.Setenv("PAYMENT_RAIL_POLICY_DENYLIST", "/etc/payment-rail/denylist.json")
 
 	cfg, err := Load()
 	if err != nil {
@@ -138,6 +143,9 @@ func TestLoadOverrides(t *testing.T) {
 	}
 	if cfg.WatcherPollInterval != 3*time.Second {
 		t.Errorf("WatcherPollInterval = %v, want %v", cfg.WatcherPollInterval, 3*time.Second)
+	}
+	if cfg.PolicyDenylist != "/etc/payment-rail/denylist.json" {
+		t.Errorf("PolicyDenylist = %q, want %q", cfg.PolicyDenylist, "/etc/payment-rail/denylist.json")
 	}
 }
 

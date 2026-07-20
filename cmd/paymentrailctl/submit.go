@@ -23,6 +23,7 @@ import (
 	"github.com/dz3ka/payment-rail/internal/chain/evm"
 	"github.com/dz3ka/payment-rail/internal/config"
 	"github.com/dz3ka/payment-rail/internal/db"
+	"github.com/dz3ka/payment-rail/internal/policy"
 	"github.com/dz3ka/payment-rail/internal/settlement"
 	"github.com/dz3ka/payment-rail/internal/signerpb"
 )
@@ -56,6 +57,12 @@ func runSubmit(args []string) error {
 	if *toFlag == "" {
 		return errors.New("submit: --to is required")
 	}
+	// Reject a malformed destination up front, before config load or any dial: a
+	// non-address --to can never be a real payment, and screening/signing must
+	// only ever see a well-formed 20-byte address.
+	if !common.IsHexAddress(*toFlag) {
+		return fmt.Errorf("submit: --to %q is not a valid address", *toFlag)
+	}
 	if *amountFlag == "" {
 		return errors.New("submit: --amount is required")
 	}
@@ -81,6 +88,38 @@ func runSubmit(args []string) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("submit: load config: %w", err)
+	}
+
+	// Structured logs to stderr keep stdout clean for the tx hash; the adapter
+	// emits one redacted line per outcome (never the amount or recipient). It is
+	// constructed here, before screening, so a denial can be audit-logged.
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+
+	// Screen the destination BEFORE any signing or dialing: a denied address must
+	// never cause a signer/chain dial, a VerifyChainID, or a broadcast. policy.Load
+	// is fail-CLOSED — a missing/malformed manifest aborts the payment; an empty
+	// PolicyDenylist path disables screening. The screen is an in-memory lookup, so
+	// context.Background() is used (the signal-cancel ctx is not established yet and
+	// is only needed for the downstream network calls).
+	screener, err := policy.Load(cfg.PolicyDenylist)
+	if err != nil {
+		return fmt.Errorf("submit: load policy denylist: %w", err) // fail closed
+	}
+	if err := screener.Screen(context.Background(), *toFlag); err != nil {
+		if errors.Is(err, policy.ErrDenied) {
+			// Compliance audit trail: a DENIED payment is exactly the event that must
+			// be recorded, so the destination + reason are logged here — a deliberate,
+			// deny-only exception to the "never log recipient" convention. Allowed
+			// payments still log nothing about the recipient; the amount is never logged.
+			logger.Warn("payment rejected by policy", "to", *toFlag, "error", err)
+		} else {
+			// The screening backend itself failed (unreachable for the in-memory
+			// denylist, but the Screener port admits an I/O-backed provider). We
+			// still fail closed below; log it at ERROR so an operator sees the
+			// control is degraded rather than silently aborting.
+			logger.Error("policy screening failed; failing closed", "error", err)
+		}
+		return fmt.Errorf("submit: screen destination: %w", err)
 	}
 
 	// --key-id defaults to the configured chain key. Resolve it after loading
@@ -119,10 +158,6 @@ func runSubmit(args []string) error {
 		GasLimitCap:        cfg.ChainGasLimitCap,
 		MaxFeePerGasCapWei: feeCap,
 	}
-
-	// Structured logs to stderr keep stdout clean for the tx hash; the adapter
-	// emits one redacted line per outcome (never the amount or recipient).
-	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 
 	// Cancel on the first termination signal so a slow RPC or signer call unwinds
 	// cleanly instead of hanging.

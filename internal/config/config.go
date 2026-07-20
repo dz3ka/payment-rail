@@ -46,6 +46,10 @@ type Config struct {
 	// Webhook delivery (M4): cadence for the webhookd delivery-worker poll loop.
 	// KafkaBrokers is reused; the consumer group id is an internal/webhook constant.
 	WebhookPollInterval time.Duration // delivery-worker poll cadence
+	// Destination screening (PRD F8): path to the JSON denylist manifest the
+	// payment path screens against before broadcast. "" disables screening. The
+	// path is plain here — policy.Load validates it fail-closed at submit time.
+	PolicyDenylist string // path to JSON denylist manifest; "" disables screening
 }
 
 // Load reads configuration from environment variables, applying documented
@@ -74,6 +78,8 @@ func Load() (Config, error) {
 		KafkaBrokers:        splitBrokers(getEnv("PAYMENT_RAIL_KAFKA_BROKERS", "localhost:19092")),
 		OutboxPollInterval:  5 * time.Second,
 		WebhookPollInterval: 5 * time.Second,
+
+		PolicyDenylist: getEnv("PAYMENT_RAIL_POLICY_DENYLIST", ""),
 	}
 
 	if v := os.Getenv("PAYMENT_RAIL_SHUTDOWN_TIMEOUT_SECONDS"); v != "" {
