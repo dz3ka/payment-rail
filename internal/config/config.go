@@ -31,6 +31,11 @@ type Config struct {
 	ChainUSDCAddress        string // USDC token contract address
 	ChainGasLimitCap        uint64 // reject intents needing more gas than this
 	ChainMaxFeePerGasCapWei string // max fee-per-gas cap, decimal wei
+	// Chain watcher (M3): confirmation-tracking knobs for the chainwatcher service.
+	// WatcherConfirmations is the depth N a tx must reach to be treated as final;
+	// WatcherPollInterval is the cadence the watcher polls the node at.
+	WatcherConfirmations uint64        // confirmation depth threshold N (>= 1)
+	WatcherPollInterval  time.Duration // poll cadence
 }
 
 // Load reads configuration from environment variables, applying documented
@@ -52,6 +57,9 @@ func Load() (Config, error) {
 		ChainUSDCAddress:        getEnv("PAYMENT_RAIL_CHAIN_USDC_ADDRESS", ""),
 		ChainGasLimitCap:        300000,
 		ChainMaxFeePerGasCapWei: getEnv("PAYMENT_RAIL_CHAIN_MAX_FEE_PER_GAS_CAP_WEI", "100000000000"),
+
+		WatcherConfirmations: 12,
+		WatcherPollInterval:  15 * time.Second,
 	}
 
 	if v := os.Getenv("PAYMENT_RAIL_SHUTDOWN_TIMEOUT_SECONDS"); v != "" {
@@ -76,6 +84,22 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("config: parse PAYMENT_RAIL_CHAIN_GAS_LIMIT_CAP %q: %w", v, err)
 		}
 		cfg.ChainGasLimitCap = limit
+	}
+
+	if v := os.Getenv("PAYMENT_RAIL_WATCHER_CONFIRMATIONS"); v != "" {
+		n, err := strconv.ParseUint(v, 10, 64)
+		if err != nil {
+			return Config{}, fmt.Errorf("config: parse PAYMENT_RAIL_WATCHER_CONFIRMATIONS %q: %w", v, err)
+		}
+		cfg.WatcherConfirmations = n
+	}
+
+	if v := os.Getenv("PAYMENT_RAIL_WATCHER_POLL_INTERVAL_SECONDS"); v != "" {
+		secs, err := strconv.Atoi(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("config: parse PAYMENT_RAIL_WATCHER_POLL_INTERVAL_SECONDS %q: %w", v, err)
+		}
+		cfg.WatcherPollInterval = time.Duration(secs) * time.Second
 	}
 
 	return cfg, nil

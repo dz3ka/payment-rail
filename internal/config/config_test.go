@@ -21,6 +21,8 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("PAYMENT_RAIL_CHAIN_USDC_ADDRESS", "")
 	t.Setenv("PAYMENT_RAIL_CHAIN_GAS_LIMIT_CAP", "")
 	t.Setenv("PAYMENT_RAIL_CHAIN_MAX_FEE_PER_GAS_CAP_WEI", "")
+	t.Setenv("PAYMENT_RAIL_WATCHER_CONFIRMATIONS", "")
+	t.Setenv("PAYMENT_RAIL_WATCHER_POLL_INTERVAL_SECONDS", "")
 
 	cfg, err := Load()
 	if err != nil {
@@ -66,6 +68,12 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.ChainMaxFeePerGasCapWei != "100000000000" {
 		t.Errorf("ChainMaxFeePerGasCapWei = %q, want %q", cfg.ChainMaxFeePerGasCapWei, "100000000000")
 	}
+	if cfg.WatcherConfirmations != 12 {
+		t.Errorf("WatcherConfirmations = %d, want %d", cfg.WatcherConfirmations, 12)
+	}
+	if cfg.WatcherPollInterval != 15*time.Second {
+		t.Errorf("WatcherPollInterval = %v, want %v", cfg.WatcherPollInterval, 15*time.Second)
+	}
 }
 
 func TestLoadOverrides(t *testing.T) {
@@ -81,6 +89,8 @@ func TestLoadOverrides(t *testing.T) {
 	t.Setenv("PAYMENT_RAIL_CHAIN_USDC_ADDRESS", "0x2222222222222222222222222222222222222222")
 	t.Setenv("PAYMENT_RAIL_CHAIN_GAS_LIMIT_CAP", "500000")
 	t.Setenv("PAYMENT_RAIL_CHAIN_MAX_FEE_PER_GAS_CAP_WEI", "250000000000")
+	t.Setenv("PAYMENT_RAIL_WATCHER_CONFIRMATIONS", "6")
+	t.Setenv("PAYMENT_RAIL_WATCHER_POLL_INTERVAL_SECONDS", "3")
 
 	cfg, err := Load()
 	if err != nil {
@@ -122,6 +132,28 @@ func TestLoadOverrides(t *testing.T) {
 	}
 	if cfg.ChainMaxFeePerGasCapWei != "250000000000" {
 		t.Errorf("ChainMaxFeePerGasCapWei = %q, want %q", cfg.ChainMaxFeePerGasCapWei, "250000000000")
+	}
+	if cfg.WatcherConfirmations != 6 {
+		t.Errorf("WatcherConfirmations = %d, want %d", cfg.WatcherConfirmations, 6)
+	}
+	if cfg.WatcherPollInterval != 3*time.Second {
+		t.Errorf("WatcherPollInterval = %v, want %v", cfg.WatcherPollInterval, 3*time.Second)
+	}
+}
+
+func TestLoadInvalidWatcherConfirmations(t *testing.T) {
+	t.Setenv("PAYMENT_RAIL_WATCHER_CONFIRMATIONS", "lots")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() = nil error, want parse error for invalid watcher confirmations")
+	}
+}
+
+func TestLoadInvalidWatcherPollInterval(t *testing.T) {
+	t.Setenv("PAYMENT_RAIL_WATCHER_POLL_INTERVAL_SECONDS", "soon")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() = nil error, want parse error for invalid watcher poll interval")
 	}
 }
 
