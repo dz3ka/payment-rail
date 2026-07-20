@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -135,6 +136,62 @@ func TestEmit_AggregateTypeDerivedFromType(t *testing.T) {
 		if env.AggregateType != wantAgg {
 			t.Errorf("aggregate_type for %q = %q, want %q", eventType, env.AggregateType, wantAgg)
 		}
+	}
+}
+
+func TestParseEnvelope_RoundTrip(t *testing.T) {
+	// A known payload as it would appear on the wire, fields in schema order.
+	const payload = `{"id":"11111111-1111-1111-1111-111111111111","type":"payment.created","aggregate_type":"payment","aggregate_id":"agg-123","occurred_at":"2026-07-20T12:00:00Z","schema_version":1,"data":{"foo":"bar"}}`
+
+	got, err := ParseEnvelope([]byte(payload))
+	if err != nil {
+		t.Fatalf("ParseEnvelope: %v", err)
+	}
+	if got.ID != "11111111-1111-1111-1111-111111111111" {
+		t.Errorf("ID = %q", got.ID)
+	}
+	if got.Type != "payment.created" {
+		t.Errorf("Type = %q, want payment.created", got.Type)
+	}
+	if got.AggregateType != "payment" {
+		t.Errorf("AggregateType = %q, want payment", got.AggregateType)
+	}
+	if got.AggregateID != "agg-123" {
+		t.Errorf("AggregateID = %q, want agg-123", got.AggregateID)
+	}
+	wantTime := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	if !got.OccurredAt.Equal(wantTime) {
+		t.Errorf("OccurredAt = %v, want %v", got.OccurredAt, wantTime)
+	}
+	if got.SchemaVersion != 1 {
+		t.Errorf("SchemaVersion = %d, want 1", got.SchemaVersion)
+	}
+	data, ok := got.Data.(map[string]any)
+	if !ok || data["foo"] != "bar" {
+		t.Errorf("Data = %v, want map with foo=bar", got.Data)
+	}
+
+	// Re-marshaling the parsed Envelope preserves the on-the-wire field order,
+	// so ParseEnvelope reads the same schema Emit writes.
+	reMarshaled, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("re-marshal: %v", err)
+	}
+	wantKeys := []string{"id", "type", "aggregate_type", "aggregate_id", "occurred_at", "schema_version", "data"}
+	gotKeys := orderedKeys(t, reMarshaled)
+	if len(gotKeys) != len(wantKeys) {
+		t.Fatalf("re-marshaled keys = %v, want %v", gotKeys, wantKeys)
+	}
+	for i := range wantKeys {
+		if gotKeys[i] != wantKeys[i] {
+			t.Fatalf("re-marshaled key[%d] = %q, want %q", i, gotKeys[i], wantKeys[i])
+		}
+	}
+}
+
+func TestParseEnvelope_InvalidJSON(t *testing.T) {
+	if _, err := ParseEnvelope([]byte("not json")); err == nil {
+		t.Fatal("ParseEnvelope(invalid) = nil error, want a wrapped error")
 	}
 }
 

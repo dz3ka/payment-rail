@@ -15,6 +15,9 @@ type Querier interface {
 	// Guarded on status = 'completed' so a concurrent or repeated cancel matches no
 	// row and the caller sees sql.ErrNoRows instead of double-reversing.
 	CancelPayment(ctx context.Context, arg CancelPaymentParams) (Payment, error)
+	// Atomically claim due pending deliveries and push their next_attempt_at forward
+	// by a lease so a crashed/slow worker's rows are not re-claimed until the lease expires.
+	ClaimDueDeliveries(ctx context.Context, arg ClaimDueDeliveriesParams) ([]ClaimDueDeliveriesRow, error)
 	// The relay's claim scan: oldest unsent rows first, FOR UPDATE SKIP LOCKED so
 	// concurrent relay workers each grab a disjoint batch without blocking.
 	ClaimUnsentOutbox(ctx context.Context, limit int32) ([]Outbox, error)
@@ -25,6 +28,9 @@ type Querier interface {
 	DeleteExpiredIdempotencyKeys(ctx context.Context, createdAt time.Time) (int64, error)
 	// Releases a claim whose handler failed, so the key isn't stuck in_flight.
 	DeleteIdempotencyKey(ctx context.Context, key string) error
+	// Insert one pending delivery per active subscription matching the event type.
+	// Idempotent on redelivery via the (event_id, subscription_id) unique constraint.
+	FanOutDelivery(ctx context.Context, arg FanOutDeliveryParams) (int64, error)
 	GetAccount(ctx context.Context, id uuid.UUID) (Account, error)
 	// Derived balance: credits add, debits subtract; never stored.
 	GetAccountBalance(ctx context.Context, accountID uuid.UUID) (int64, error)
@@ -70,6 +76,9 @@ type Querier interface {
 	// is terminal and deliberately excluded. Ordered by created_at so the watcher
 	// processes them oldest-first.
 	ListPendingSettlements(ctx context.Context) ([]Settlement, error)
+	MarkDeliveryDeadLettered(ctx context.Context, arg MarkDeliveryDeadLetteredParams) error
+	MarkDeliveryRetry(ctx context.Context, arg MarkDeliveryRetryParams) error
+	MarkDeliverySucceeded(ctx context.Context, arg MarkDeliverySucceededParams) error
 	// Stamps a claimed batch as published; ANY($1) marks the whole batch in one
 	// round-trip after Kafka acks.
 	MarkOutboxSent(ctx context.Context, dollar_1 []uuid.UUID) (int64, error)
@@ -85,6 +94,9 @@ type Querier interface {
 	// settle matches no row and the caller sees sql.ErrNoRows instead of
 	// re-pointing settle_entry_id. A reorged tx that re-confirms settles again.
 	MarkSettlementSettled(ctx context.Context, arg MarkSettlementSettledParams) (Settlement, error)
+	// Re-drive every dead-lettered delivery for one subscription (operator action
+	// after fixing a broken endpoint): reset to pending, clear error, deliver now.
+	ReplayDeadLettered(ctx context.Context, subscriptionID uuid.UUID) (int64, error)
 }
 
 var _ Querier = (*Queries)(nil)

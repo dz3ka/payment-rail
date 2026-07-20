@@ -43,6 +43,9 @@ type Config struct {
 	// batch size stay as internal/outbox constants, not config.
 	KafkaBrokers       []string      // Kafka bootstrap brokers ("host:port,...")
 	OutboxPollInterval time.Duration // relay drain cadence
+	// Webhook delivery (M4): cadence for the webhookd delivery-worker poll loop.
+	// KafkaBrokers is reused; the consumer group id is an internal/webhook constant.
+	WebhookPollInterval time.Duration // delivery-worker poll cadence
 }
 
 // Load reads configuration from environment variables, applying documented
@@ -68,8 +71,9 @@ func Load() (Config, error) {
 		WatcherConfirmations: 12,
 		WatcherPollInterval:  15 * time.Second,
 
-		KafkaBrokers:       splitBrokers(getEnv("PAYMENT_RAIL_KAFKA_BROKERS", "localhost:19092")),
-		OutboxPollInterval: 5 * time.Second,
+		KafkaBrokers:        splitBrokers(getEnv("PAYMENT_RAIL_KAFKA_BROKERS", "localhost:19092")),
+		OutboxPollInterval:  5 * time.Second,
+		WebhookPollInterval: 5 * time.Second,
 	}
 
 	if v := os.Getenv("PAYMENT_RAIL_SHUTDOWN_TIMEOUT_SECONDS"); v != "" {
@@ -118,6 +122,14 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("config: parse PAYMENT_RAIL_OUTBOX_POLL_INTERVAL_SECONDS %q: %w", v, err)
 		}
 		cfg.OutboxPollInterval = time.Duration(secs) * time.Second
+	}
+
+	if v := os.Getenv("PAYMENT_RAIL_WEBHOOK_POLL_INTERVAL_SECONDS"); v != "" {
+		secs, err := strconv.Atoi(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("config: parse PAYMENT_RAIL_WEBHOOK_POLL_INTERVAL_SECONDS %q: %w", v, err)
+		}
+		cfg.WebhookPollInterval = time.Duration(secs) * time.Second
 	}
 
 	return cfg, nil

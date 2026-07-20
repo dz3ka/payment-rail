@@ -251,3 +251,29 @@ func (q *fakeQuerier) ClaimUnsentOutbox(context.Context, int32) ([]db.Outbox, er
 func (q *fakeQuerier) MarkOutboxSent(context.Context, []uuid.UUID) (int64, error) {
 	panic("fakeQuerier.MarkOutboxSent: not used by the ledger domain")
 }
+
+// Webhook delivery methods belong to the webhook service; the ledger domain
+// never calls them, so they panic like the outbox/settlement stubs above.
+func (q *fakeQuerier) FanOutDelivery(context.Context, db.FanOutDeliveryParams) (int64, error) {
+	panic("fakeQuerier.FanOutDelivery: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) ClaimDueDeliveries(context.Context, db.ClaimDueDeliveriesParams) ([]db.ClaimDueDeliveriesRow, error) {
+	panic("fakeQuerier.ClaimDueDeliveries: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) MarkDeliverySucceeded(context.Context, db.MarkDeliverySucceededParams) error {
+	panic("fakeQuerier.MarkDeliverySucceeded: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) MarkDeliveryRetry(context.Context, db.MarkDeliveryRetryParams) error {
+	panic("fakeQuerier.MarkDeliveryRetry: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) MarkDeliveryDeadLettered(context.Context, db.MarkDeliveryDeadLetteredParams) error {
+	panic("fakeQuerier.MarkDeliveryDeadLettered: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) ReplayDeadLettered(context.Context, uuid.UUID) (int64, error) {
+	panic("fakeQuerier.ReplayDeadLettered: not used by the ledger domain")
+}

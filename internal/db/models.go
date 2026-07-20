@@ -81,3 +81,27 @@ type Settlement struct {
 	SettledBlockHash   sql.NullString
 	SettledBlockNumber sql.NullInt64
 }
+
+type WebhookDelivery struct {
+	ID             uuid.UUID
+	EventID        uuid.UUID
+	SubscriptionID uuid.UUID
+	EventType      string
+	Payload        json.RawMessage
+	Status         string
+	Attempts       int32
+	NextAttemptAt  time.Time
+	LastStatusCode sql.NullInt32
+	LastError      sql.NullString
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+type WebhookSubscription struct {
+	ID            uuid.UUID
+	Url           string
+	EventTypes    []string
+	SigningSecret string
+	Active        bool
+	CreatedAt     time.Time
+}

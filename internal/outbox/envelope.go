@@ -26,10 +26,10 @@ const (
 	DefaultBatchSize = 100
 )
 
-// envelope is the JSON shape written to the outbox payload column and later
+// Envelope is the JSON shape written to the outbox payload column and later
 // published verbatim as the Kafka value. The field order below is the on-the-wire
 // order; keep it stable — consumers and the envelope_test assert on it.
-type envelope struct {
+type Envelope struct {
 	ID            string    `json:"id"`
 	Type          string    `json:"type"`
 	AggregateType string    `json:"aggregate_type"`
@@ -47,7 +47,7 @@ type envelope struct {
 // the event type for context and propagates, rolling back the surrounding tx.
 func Emit(ctx context.Context, q db.Querier, e Event) error {
 	id := uuid.New()
-	env := envelope{
+	env := Envelope{
 		ID:            id.String(),
 		Type:          e.Type,
 		AggregateType: strings.SplitN(e.Type, ".", 2)[0],
@@ -69,4 +69,14 @@ func Emit(ctx context.Context, q db.Querier, e Event) error {
 		return fmt.Errorf("outbox: emit %s: %w", e.Type, err)
 	}
 	return nil
+}
+
+// ParseEnvelope decodes a published outbox event envelope (the JSON value of a
+// Kafka message on DefaultTopic). Consumers use it to read events off the topic.
+func ParseEnvelope(data []byte) (Envelope, error) {
+	var e Envelope
+	if err := json.Unmarshal(data, &e); err != nil {
+		return Envelope{}, fmt.Errorf("parse outbox envelope: %w", err)
+	}
+	return e, nil
 }
