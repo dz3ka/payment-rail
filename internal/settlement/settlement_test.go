@@ -258,6 +258,10 @@ func (q *fakeQuerier) MarkSettlementSettled(ctx context.Context, arg db.MarkSett
 	}
 	sett.Status = "settled"
 	sett.SettleEntryID = arg.SettleEntryID
+	// Model the anchor columns WP1 added: settle records the settling block so a
+	// later finality/reorg check has provenance to compare against.
+	sett.SettledBlockHash = arg.SettledBlockHash
+	sett.SettledBlockNumber = arg.SettledBlockNumber
 	sett.UpdatedAt = time.Now()
 	q.settlements[arg.TxHash] = sett
 	return sett, nil
@@ -272,6 +276,23 @@ func (q *fakeQuerier) MarkSettlementReorged(ctx context.Context, txHash string) 
 		return db.Settlement{}, sql.ErrNoRows // guarded WHERE status = 'settled'
 	}
 	sett.Status = "reorged"
+	// WP1: reorg NULLs the anchor so a reorged row carries no stale provenance.
+	sett.SettledBlockHash = sql.NullString{}
+	sett.SettledBlockNumber = sql.NullInt64{}
+	sett.UpdatedAt = time.Now()
+	q.settlements[txHash] = sett
+	return sett, nil
+}
+
+func (q *fakeQuerier) MarkSettlementFinalized(ctx context.Context, txHash string) (db.Settlement, error) {
+	if err := ctx.Err(); err != nil {
+		return db.Settlement{}, err
+	}
+	sett, ok := q.settlements[txHash]
+	if !ok || sett.Status != "settled" {
+		return db.Settlement{}, sql.ErrNoRows // guarded WHERE status = 'settled'
+	}
+	sett.Status = "finalized"
 	sett.UpdatedAt = time.Now()
 	q.settlements[txHash] = sett
 	return sett, nil
@@ -316,11 +337,12 @@ func (q *fakeQuerier) DeleteExpiredIdempotencyKeys(context.Context, time.Time) (
 // --- fixtures ---------------------------------------------------------------
 
 const (
-	asset  = "USDC"
-	amount = int64(500)
-	txHash = "0x" + "ab"
-	blockA = "0xaaaa"
-	blockB = "0xbbbb"
+	asset    = "USDC"
+	amount   = int64(500)
+	txHash   = "0x" + "ab"
+	blockA   = "0xaaaa"
+	blockB   = "0xbbbb"
+	blockNum = uint64(42) // the settling block's height, anchored by settle
 )
 
 // fixture wires accounts + a completed payment + a pending settlement whose
@@ -347,7 +369,7 @@ func newFixture(t *testing.T, destOpening int64) fixture {
 }
 
 func status(phase evm.Phase, block string) evm.Status {
-	return evm.Status{TxHash: chain.TxHash(txHash), Phase: phase, BlockHash: block}
+	return evm.Status{TxHash: chain.TxHash(txHash), Phase: phase, BlockHash: block, BlockNumber: blockNum}
 }
 
 // --- tests ------------------------------------------------------------------
@@ -431,6 +453,99 @@ func TestOnStatus_Reverse(t *testing.T) {
 	}
 	if got := f.q.settlements[txHash].Status; got != "reorged" {
 		t.Errorf("status = %q, want reorged", got)
+	}
+}
+
+// A settle anchors the settling block's hash and number onto the row so a later
+// finality/reorg check has provenance to compare against.
+func TestOnStatus_SettleRecordsAnchor(t *testing.T) {
+	f := newFixture(t, amount)
+	sink := NewSink(f.store, nil)
+
+	if err := sink.OnStatus(context.Background(), status(evm.PhaseConfirmed, blockA)); err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+
+	sett := f.q.settlements[txHash]
+	if !sett.SettledBlockHash.Valid || sett.SettledBlockHash.String != blockA {
+		t.Errorf("settled_block_hash = %+v, want valid %q", sett.SettledBlockHash, blockA)
+	}
+	if !sett.SettledBlockNumber.Valid || sett.SettledBlockNumber.Int64 != int64(blockNum) {
+		t.Errorf("settled_block_number = %+v, want valid %d", sett.SettledBlockNumber, blockNum)
+	}
+}
+
+// A reorg clears the anchor (WP1 NULLs the columns) so a reorged row carries no
+// stale finality provenance.
+func TestOnStatus_ReverseClearsAnchor(t *testing.T) {
+	f := newFixture(t, amount)
+	sink := NewSink(f.store, nil)
+	ctx := context.Background()
+
+	if err := sink.OnStatus(ctx, status(evm.PhaseConfirmed, blockA)); err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+	if err := sink.OnStatus(ctx, status(evm.PhaseReorged, blockA)); err != nil {
+		t.Fatalf("reverse: %v", err)
+	}
+
+	sett := f.q.settlements[txHash]
+	if sett.SettledBlockHash.Valid || sett.SettledBlockNumber.Valid {
+		t.Errorf("anchor not cleared on reorg: hash=%+v number=%+v", sett.SettledBlockHash, sett.SettledBlockNumber)
+	}
+}
+
+// A Finalized on a settled tx flips the row to finalized as a pure status
+// transition: settle already moved the money, so finalize posts NO journal entry.
+func TestOnStatus_Finalize(t *testing.T) {
+	f := newFixture(t, amount)
+	sink := NewSink(f.store, nil)
+	ctx := context.Background()
+
+	if err := sink.OnStatus(ctx, status(evm.PhaseConfirmed, blockA)); err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+	if got := f.q.entryCount(); got != 1 {
+		t.Fatalf("entry count after settle = %d, want 1", got)
+	}
+	entriesAfterSettle := f.q.entryCount()
+
+	if err := sink.OnStatus(ctx, status(evm.PhaseFinalized, blockA)); err != nil {
+		t.Fatalf("finalize: %v", err)
+	}
+
+	if got := f.q.settlements[txHash].Status; got != "finalized" {
+		t.Errorf("status = %q, want finalized", got)
+	}
+	if got := f.q.entryCount(); got != entriesAfterSettle {
+		t.Errorf("entry count = %d, want %d (finalize posts no journal entry)", got, entriesAfterSettle)
+	}
+}
+
+// Redelivering Finalized on an already-finalized row is a benign no-op: the
+// guarded UPDATE returns ErrNoRows, OnStatus returns nil, and nothing is posted.
+func TestOnStatus_FinalizeIdempotent(t *testing.T) {
+	f := newFixture(t, amount)
+	sink := NewSink(f.store, nil)
+	ctx := context.Background()
+
+	if err := sink.OnStatus(ctx, status(evm.PhaseConfirmed, blockA)); err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+	if err := sink.OnStatus(ctx, status(evm.PhaseFinalized, blockA)); err != nil {
+		t.Fatalf("finalize: %v", err)
+	}
+	entriesAfterFirst := f.q.entryCount()
+
+	if err := sink.OnStatus(ctx, status(evm.PhaseFinalized, blockA)); err != nil {
+		t.Fatalf("redelivered finalize: %v", err)
+	}
+
+	if got := f.q.settlements[txHash].Status; got != "finalized" {
+		t.Errorf("status = %q, want finalized (unchanged)", got)
+	}
+	if got := f.q.entryCount(); got != entriesAfterFirst {
+		t.Errorf("entry count = %d, want %d (no post on redelivery)", got, entriesAfterFirst)
 	}
 }
 

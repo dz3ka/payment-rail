@@ -7,12 +7,13 @@ package db
 
 import (
 	"context"
+	"database/sql"
 
 	"github.com/google/uuid"
 )
 
 const getSettlementByTxHash = `-- name: GetSettlementByTxHash :one
-SELECT id, payment_id, tx_hash, status, settle_entry_id, created_at, updated_at FROM settlements
+SELECT id, payment_id, tx_hash, status, settle_entry_id, created_at, updated_at, settled_block_hash, settled_block_number FROM settlements
 WHERE tx_hash = $1
 `
 
@@ -27,6 +28,8 @@ func (q *Queries) GetSettlementByTxHash(ctx context.Context, txHash string) (Set
 		&i.SettleEntryID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.SettledBlockHash,
+		&i.SettledBlockNumber,
 	)
 	return i, err
 }
@@ -35,7 +38,7 @@ const insertSettlement = `-- name: InsertSettlement :one
 INSERT INTO settlements (payment_id, tx_hash)
 VALUES ($1, $2)
 ON CONFLICT (tx_hash) DO NOTHING
-RETURNING id, payment_id, tx_hash, status, settle_entry_id, created_at, updated_at
+RETURNING id, payment_id, tx_hash, status, settle_entry_id, created_at, updated_at, settled_block_hash, settled_block_number
 `
 
 type InsertSettlementParams struct {
@@ -58,12 +61,14 @@ func (q *Queries) InsertSettlement(ctx context.Context, arg InsertSettlementPara
 		&i.SettleEntryID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.SettledBlockHash,
+		&i.SettledBlockNumber,
 	)
 	return i, err
 }
 
 const listPendingSettlements = `-- name: ListPendingSettlements :many
-SELECT id, payment_id, tx_hash, status, settle_entry_id, created_at, updated_at FROM settlements
+SELECT id, payment_id, tx_hash, status, settle_entry_id, created_at, updated_at, settled_block_hash, settled_block_number FROM settlements
 WHERE status IN ('pending', 'settled')
 ORDER BY created_at
 `
@@ -88,6 +93,8 @@ func (q *Queries) ListPendingSettlements(ctx context.Context) ([]Settlement, err
 			&i.SettleEntryID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.SettledBlockHash,
+			&i.SettledBlockNumber,
 		); err != nil {
 			return nil, err
 		}
@@ -102,15 +109,44 @@ func (q *Queries) ListPendingSettlements(ctx context.Context) ([]Settlement, err
 	return items, nil
 }
 
+const markSettlementFinalized = `-- name: MarkSettlementFinalized :one
+UPDATE settlements
+SET status = 'finalized', updated_at = now()
+WHERE tx_hash = $1 AND status = 'settled'
+RETURNING id, payment_id, tx_hash, status, settle_entry_id, created_at, updated_at, settled_block_hash, settled_block_number
+`
+
+// Guarded on status = 'settled' so only a settled tx can finalize; a reorged or
+// still-pending tx matches no row. ErrNoRows here is an idempotent no-op for the
+// caller (already finalized, or reorged out from under the promotion).
+func (q *Queries) MarkSettlementFinalized(ctx context.Context, txHash string) (Settlement, error) {
+	row := q.db.QueryRowContext(ctx, markSettlementFinalized, txHash)
+	var i Settlement
+	err := row.Scan(
+		&i.ID,
+		&i.PaymentID,
+		&i.TxHash,
+		&i.Status,
+		&i.SettleEntryID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.SettledBlockHash,
+		&i.SettledBlockNumber,
+	)
+	return i, err
+}
+
 const markSettlementReorged = `-- name: MarkSettlementReorged :one
 UPDATE settlements
-SET status = 'reorged', updated_at = now()
+SET status = 'reorged', settled_block_hash = NULL, settled_block_number = NULL,
+    updated_at = now()
 WHERE tx_hash = $1 AND status = 'settled'
-RETURNING id, payment_id, tx_hash, status, settle_entry_id, created_at, updated_at
+RETURNING id, payment_id, tx_hash, status, settle_entry_id, created_at, updated_at, settled_block_hash, settled_block_number
 `
 
 // Guarded on status = 'settled' so only a previously-settled tx can be
-// reorged; a still-pending or already-reorged tx matches no row.
+// reorged; a still-pending or already-reorged tx matches no row. Clears the
+// recorded block so a reorged row carries no stale finality provenance.
 func (q *Queries) MarkSettlementReorged(ctx context.Context, txHash string) (Settlement, error) {
 	row := q.db.QueryRowContext(ctx, markSettlementReorged, txHash)
 	var i Settlement
@@ -122,27 +158,37 @@ func (q *Queries) MarkSettlementReorged(ctx context.Context, txHash string) (Set
 		&i.SettleEntryID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.SettledBlockHash,
+		&i.SettledBlockNumber,
 	)
 	return i, err
 }
 
 const markSettlementSettled = `-- name: MarkSettlementSettled :one
 UPDATE settlements
-SET status = 'settled', settle_entry_id = $2, updated_at = now()
+SET status = 'settled', settle_entry_id = $2,
+    settled_block_hash = $3, settled_block_number = $4, updated_at = now()
 WHERE tx_hash = $1 AND status IN ('pending', 'reorged')
-RETURNING id, payment_id, tx_hash, status, settle_entry_id, created_at, updated_at
+RETURNING id, payment_id, tx_hash, status, settle_entry_id, created_at, updated_at, settled_block_hash, settled_block_number
 `
 
 type MarkSettlementSettledParams struct {
-	TxHash        string
-	SettleEntryID uuid.NullUUID
+	TxHash             string
+	SettleEntryID      uuid.NullUUID
+	SettledBlockHash   sql.NullString
+	SettledBlockNumber sql.NullInt64
 }
 
 // Guarded on status IN ('pending', 'reorged') so a concurrent or repeated
 // settle matches no row and the caller sees sql.ErrNoRows instead of
 // re-pointing settle_entry_id. A reorged tx that re-confirms settles again.
 func (q *Queries) MarkSettlementSettled(ctx context.Context, arg MarkSettlementSettledParams) (Settlement, error) {
-	row := q.db.QueryRowContext(ctx, markSettlementSettled, arg.TxHash, arg.SettleEntryID)
+	row := q.db.QueryRowContext(ctx, markSettlementSettled,
+		arg.TxHash,
+		arg.SettleEntryID,
+		arg.SettledBlockHash,
+		arg.SettledBlockNumber,
+	)
 	var i Settlement
 	err := row.Scan(
 		&i.ID,
@@ -152,6 +198,8 @@ func (q *Queries) MarkSettlementSettled(ctx context.Context, arg MarkSettlementS
 		&i.SettleEntryID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.SettledBlockHash,
+		&i.SettledBlockNumber,
 	)
 	return i, err
 }

@@ -61,11 +61,13 @@ type Payment struct {
 }
 
 type Settlement struct {
-	ID            uuid.UUID
-	PaymentID     uuid.UUID
-	TxHash        string
-	Status        string
-	SettleEntryID uuid.NullUUID
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	ID                 uuid.UUID
+	PaymentID          uuid.UUID
+	TxHash             string
+	Status             string
+	SettleEntryID      uuid.NullUUID
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+	SettledBlockHash   sql.NullString
+	SettledBlockNumber sql.NullInt64
 }

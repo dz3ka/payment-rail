@@ -69,7 +69,9 @@ func TestWatcherReversesAndReappliesOnSimulatedBackend(t *testing.T) {
 	backend.Commit() // block 1 seals the tx
 
 	// N=2 so the tx confirms after one further block and re-confirms after the reorg.
-	w, err := NewWatcher(client, 2, time.Second, testLogger())
+	// Finality depth well above any height this test reaches, so eviction never races
+	// the reorg the test is exercising.
+	w, err := NewWatcher(client, 2, 10, time.Second, testLogger())
 	if err != nil {
 		t.Fatalf("NewWatcher: %v", err)
 	}

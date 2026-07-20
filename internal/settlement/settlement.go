@@ -107,17 +107,24 @@ func NewSink(tx ledger.Store, log *slog.Logger) *Sink {
 	return &Sink{tx: tx, log: log}
 }
 
-// OnStatus applies one watcher transition to the ledger. It acts only on the two
-// terminal-effect phases — Confirmed (settle) and Reorged (reverse) — and
-// returns nil immediately for every other phase without touching the database.
+// OnStatus applies one watcher transition to the ledger. It acts on the three
+// effecting phases — Confirmed (settle), Reorged (reverse), and Finalized
+// (finalize) — and returns nil immediately for every other phase without
+// touching the database.
 //
-// All work runs inside one ExecTx so the journal entry and the settlement-row
-// status flip commit atomically. The transaction resolves the tracked settlement
-// (an untracked tx_hash is not an error, just nil), then the payment it settles
-// and the per-asset clearing account, and hands off to settle or reverse.
+// Settle and reverse run inside one shared ExecTx so the journal entry and the
+// settlement-row status flip commit atomically: the transaction resolves the
+// tracked settlement (an untracked tx_hash is not an error, just nil), then the
+// payment it settles and the per-asset clearing account, and hands off to settle
+// or reverse. Finalize is a pure status transition — settle already moved the
+// money — so it posts no journal entry and runs its own single-statement ExecTx
+// without resolving the payment or clearing account.
 func (s *Sink) OnStatus(ctx context.Context, st evm.Status) error {
 	switch st.Phase {
 	case evm.PhaseConfirmed, evm.PhaseReorged:
+		// resolved and dispatched through the shared ExecTx below
+	case evm.PhaseFinalized:
+		return s.finalize(ctx, st)
 	default:
 		return nil // pending/mined carry no ledger effect
 	}
@@ -194,6 +201,11 @@ func (s *Sink) settle(ctx context.Context, q db.Querier, sett db.Settlement, pay
 	if _, err := q.MarkSettlementSettled(ctx, db.MarkSettlementSettledParams{
 		TxHash:        string(st.TxHash),
 		SettleEntryID: settleEntryID,
+		// Anchor the block this settle observed so a later finality/reorg check
+		// has the provenance to compare against (MarkSettlementReorged NULLs it
+		// again if the tx leaves the canonical chain).
+		SettledBlockHash:   sql.NullString{String: st.BlockHash, Valid: true},
+		SettledBlockNumber: sql.NullInt64{Int64: int64(st.BlockNumber), Valid: true},
 	}); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil // already settled; idempotent no-op
@@ -248,6 +260,36 @@ func (s *Sink) reverse(ctx context.Context, q db.Querier, sett db.Settlement, pa
 
 	s.logResult(ctx, "reverse", pay, st, nil)
 	return nil
+}
+
+// finalize records that a settled tx is now buried past finality — deep enough
+// that a reversing reorg is treated as impossible. It is a pure status transition
+// with NO ledger effect: settle already moved the money into the house account, so
+// there is nothing to post. The single guarded UPDATE (status 'settled' →
+// 'finalized') runs in its own ExecTx; a redelivered Finalized on an
+// already-finalized (or no-longer-settled) row matches no row and comes back as
+// sql.ErrNoRows, which is the benign idempotent no-op — exactly the convention
+// settle/reverse use for their guarded Marks.
+func (s *Sink) finalize(ctx context.Context, st evm.Status) error {
+	txHash := string(st.TxHash)
+	return s.tx.ExecTx(ctx, func(q db.Querier) error {
+		sett, err := q.MarkSettlementFinalized(ctx, txHash)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil // already finalized or not settled; idempotent no-op
+			}
+			return fmt.Errorf("settlement: mark finalized %s: %w", txHash, err)
+		}
+		// Mirror logResult's redacted attr shape (identifiers and public chain data
+		// only, never amounts). finalize resolves no payment, so it logs against the
+		// tx directly rather than through logResult's payment-keyed helper.
+		s.log.InfoContext(ctx, "settlement.finalized",
+			"tx_hash", txHash,
+			"block_hash", st.BlockHash,
+			"status", sett.Status,
+		)
+		return nil
+	})
 }
 
 // logResult emits one structured record per settlement outcome. It mirrors the

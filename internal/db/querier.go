@@ -61,8 +61,13 @@ type Querier interface {
 	// i.e. pending (awaiting confirmation) or settled (watched for reorg). Ordered
 	// by created_at so the watcher processes them oldest-first.
 	ListPendingSettlements(ctx context.Context) ([]Settlement, error)
+	// Guarded on status = 'settled' so only a settled tx can finalize; a reorged or
+	// still-pending tx matches no row. ErrNoRows here is an idempotent no-op for the
+	// caller (already finalized, or reorged out from under the promotion).
+	MarkSettlementFinalized(ctx context.Context, txHash string) (Settlement, error)
 	// Guarded on status = 'settled' so only a previously-settled tx can be
-	// reorged; a still-pending or already-reorged tx matches no row.
+	// reorged; a still-pending or already-reorged tx matches no row. Clears the
+	// recorded block so a reorged row carries no stale finality provenance.
 	MarkSettlementReorged(ctx context.Context, txHash string) (Settlement, error)
 	// Guarded on status IN ('pending', 'reorged') so a concurrent or repeated
 	// settle matches no row and the caller sees sql.ErrNoRows instead of

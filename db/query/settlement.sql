@@ -17,15 +17,27 @@ WHERE tx_hash = $1;
 -- settle matches no row and the caller sees sql.ErrNoRows instead of
 -- re-pointing settle_entry_id. A reorged tx that re-confirms settles again.
 UPDATE settlements
-SET status = 'settled', settle_entry_id = $2, updated_at = now()
+SET status = 'settled', settle_entry_id = $2,
+    settled_block_hash = $3, settled_block_number = $4, updated_at = now()
 WHERE tx_hash = $1 AND status IN ('pending', 'reorged')
 RETURNING *;
 
 -- name: MarkSettlementReorged :one
 -- Guarded on status = 'settled' so only a previously-settled tx can be
--- reorged; a still-pending or already-reorged tx matches no row.
+-- reorged; a still-pending or already-reorged tx matches no row. Clears the
+-- recorded block so a reorged row carries no stale finality provenance.
 UPDATE settlements
-SET status = 'reorged', updated_at = now()
+SET status = 'reorged', settled_block_hash = NULL, settled_block_number = NULL,
+    updated_at = now()
+WHERE tx_hash = $1 AND status = 'settled'
+RETURNING *;
+
+-- name: MarkSettlementFinalized :one
+-- Guarded on status = 'settled' so only a settled tx can finalize; a reorged or
+-- still-pending tx matches no row. ErrNoRows here is an idempotent no-op for the
+-- caller (already finalized, or reorged out from under the promotion).
+UPDATE settlements
+SET status = 'finalized', updated_at = now()
 WHERE tx_hash = $1 AND status = 'settled'
 RETURNING *;
 

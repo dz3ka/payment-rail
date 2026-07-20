@@ -230,6 +230,10 @@ func (q *fakeQuerier) MarkSettlementReorged(context.Context, string) (db.Settlem
 	panic("fakeQuerier.MarkSettlementReorged: not used by the ledger domain")
 }
 
+func (q *fakeQuerier) MarkSettlementFinalized(context.Context, string) (db.Settlement, error) {
+	panic("fakeQuerier.MarkSettlementFinalized: not used by the ledger domain")
+}
+
 func (q *fakeQuerier) ListPendingSettlements(context.Context) ([]db.Settlement, error) {
 	panic("fakeQuerier.ListPendingSettlements: not used by the ledger domain")
 }

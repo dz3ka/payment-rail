@@ -115,7 +115,7 @@ func phasesOf(ss []Status) []Phase {
 func TestWatcherDrivesPendingToConfirmed(t *testing.T) {
 	ctx := context.Background()
 	r := newFakeReader()
-	w, err := NewWatcher(r, 3, time.Second, testLogger())
+	w, err := NewWatcher(r, 3, 6, time.Second, testLogger())
 	if err != nil {
 		t.Fatalf("NewWatcher: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestWatcherConfirmationDepthConfigurable(t *testing.T) {
 		r := newFakeReader()
 		r.receiptFn = foundReceipt(5, blockHash)
 		r.headerFn = staticHeader(hdr)
-		w, err := NewWatcher(r, depth, time.Second, testLogger())
+		w, err := NewWatcher(r, depth, depth+5, time.Second, testLogger())
 		if err != nil {
 			t.Fatalf("NewWatcher: %v", err)
 		}
@@ -215,7 +215,7 @@ func TestWatcherEmitsMinedProgressAsDepthClimbs(t *testing.T) {
 	hdr := makeHeader(10, 'a')
 	r.receiptFn = foundReceipt(10, hdr.Hash())
 	r.headerFn = staticHeader(hdr)
-	w, err := NewWatcher(r, 100, time.Second, testLogger()) // N high so it never confirms
+	w, err := NewWatcher(r, 100, 200, time.Second, testLogger()) // N high so it never confirms
 	if err != nil {
 		t.Fatalf("NewWatcher: %v", err)
 	}
@@ -252,7 +252,7 @@ func TestWatcherFlagsReorgOnReceiptDisappearance(t *testing.T) {
 	hdr := makeHeader(10, 'a')
 	r.receiptFn = foundReceipt(10, hdr.Hash())
 	r.headerFn = staticHeader(hdr)
-	w, err := NewWatcher(r, 5, time.Second, testLogger())
+	w, err := NewWatcher(r, 5, 10, time.Second, testLogger())
 	if err != nil {
 		t.Fatalf("NewWatcher: %v", err)
 	}
@@ -279,7 +279,7 @@ func TestWatcherFlagsReorgOnCanonicalHashChange(t *testing.T) {
 	original := makeHeader(10, 'a')
 	r.receiptFn = foundReceipt(10, original.Hash())
 	r.headerFn = staticHeader(original)
-	w, err := NewWatcher(r, 5, time.Second, testLogger())
+	w, err := NewWatcher(r, 5, 10, time.Second, testLogger())
 	if err != nil {
 		t.Fatalf("NewWatcher: %v", err)
 	}
@@ -312,7 +312,7 @@ func TestWatcherIgnoresTransientRPCError(t *testing.T) {
 	hdr := makeHeader(10, 'a')
 	r.receiptFn = foundReceipt(10, hdr.Hash())
 	r.headerFn = staticHeader(hdr)
-	w, err := NewWatcher(r, 2, time.Second, testLogger())
+	w, err := NewWatcher(r, 2, 10, time.Second, testLogger())
 	if err != nil {
 		t.Fatalf("NewWatcher: %v", err)
 	}
@@ -349,7 +349,7 @@ func TestWatcherReversesAndReapplies(t *testing.T) {
 	ctx := context.Background()
 	r := newFakeReader()
 	hdrA := makeHeader(10, 'a')
-	w, err := NewWatcher(r, 2, time.Second, testLogger()) // N=2
+	w, err := NewWatcher(r, 2, 10, time.Second, testLogger()) // N=2
 	if err != nil {
 		t.Fatalf("NewWatcher: %v", err)
 	}
@@ -413,7 +413,7 @@ func TestWatcherConfirmedIgnoresTransientRPCError(t *testing.T) {
 	hdr := makeHeader(10, 'a')
 	r.receiptFn = foundReceipt(10, hdr.Hash())
 	r.headerFn = staticHeader(hdr)
-	w, err := NewWatcher(r, 1, time.Second, testLogger()) // N=1 ⇒ confirms on first sighting
+	w, err := NewWatcher(r, 1, 5, time.Second, testLogger()) // N=1 ⇒ confirms on first sighting
 	if err != nil {
 		t.Fatalf("NewWatcher: %v", err)
 	}
@@ -442,6 +442,147 @@ func TestWatcherConfirmedIgnoresTransientRPCError(t *testing.T) {
 	// A genuine reorg after the blips still reverses it.
 	r.receiptFn = notFoundReceipt
 	requirePhases(t, w.poll(ctx), PhaseReorged)
+}
+
+// TestWatcherResumeSeedsConfirmedWithoutReEmitting proves the crash-recovery path:
+// a settlement row persisted as settled is re-tracked via Resume as a Confirmed
+// anchor. On the next poll — still canonical, buried past N but short of finality —
+// nothing is surfaced, so the settle that already landed is not re-emitted.
+func TestWatcherResumeSeedsConfirmedWithoutReEmitting(t *testing.T) {
+	ctx := context.Background()
+	r := newFakeReader()
+	hdr := makeHeader(10, 'a')
+	blockHash := hdr.Hash()
+	r.receiptFn = foundReceipt(10, blockHash)
+	r.headerFn = staticHeader(hdr)
+	w, err := NewWatcher(r, 3, 10, time.Second, testLogger())
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	if err := w.Resume(testTxHash, blockHash.Hex(), 10); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+
+	// Head past N=3 but below finality=10: the anchor holds and was already surfaced,
+	// so the poll emits nothing — no duplicate settle.
+	r.blockNumber = 12 // depth 3 == N
+	requirePhases(t, w.poll(ctx))
+}
+
+// TestWatcherResumeSurfacesReorgWhileDown proves the other half of Resume's value:
+// if the chain reorged while the process was down, re-tracking the settled row as a
+// Confirmed anchor still catches it — the diverged canonical header surfaces as
+// Reorged on the first poll after recovery.
+func TestWatcherResumeSurfacesReorgWhileDown(t *testing.T) {
+	ctx := context.Background()
+	r := newFakeReader()
+	original := makeHeader(10, 'a')
+	w, err := NewWatcher(r, 3, 10, time.Second, testLogger())
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	if err := w.Resume(testTxHash, original.Hash().Hex(), 10); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+
+	// The canonical block at height 10 is now a different block: a reorg landed while
+	// the watcher was down. The receipt still reports the old anchor, but the header
+	// diverges ⇒ Reorged.
+	r.receiptFn = foundReceipt(10, original.Hash())
+	r.headerFn = staticHeader(makeHeader(10, 'b'))
+	r.blockNumber = 12
+	requirePhases(t, w.poll(ctx), PhaseReorged)
+}
+
+// TestWatcherResumeIsIdempotent proves Resume mirrors Track's idempotency: resuming
+// an already-tracked key is a no-op, never a reset of the live entry.
+func TestWatcherResumeIsIdempotent(t *testing.T) {
+	w, err := NewWatcher(newFakeReader(), 3, 10, time.Second, testLogger())
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	firstHash := makeHeader(10, 'a').Hash()
+	if err := w.Resume(testTxHash, firstHash.Hex(), 10); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	// A second Resume with different anchor data must not clobber the first.
+	if err := w.Resume(testTxHash, makeHeader(11, 'b').Hash().Hex(), 99); err != nil {
+		t.Fatalf("Resume duplicate should be idempotent, got %v", err)
+	}
+	w.mu.Lock()
+	entry := w.tracked[testTxHash]
+	w.mu.Unlock()
+	if entry == nil || entry.blockNumber != 10 || entry.blockHash != firstHash {
+		t.Fatalf("Resume reset an existing entry: %+v", entry)
+	}
+}
+
+// TestWatcherResumeValidatesHashes proves both caller-supplied hashes are validated
+// at the boundary before either reaches the map or an RPC call.
+func TestWatcherResumeValidatesHashes(t *testing.T) {
+	w, err := NewWatcher(newFakeReader(), 3, 10, time.Second, testLogger())
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	goodBlock := makeHeader(10, 'a').Hash().Hex()
+	if err := w.Resume("not-a-hash", goodBlock, 10); !errors.Is(err, chain.ErrInvalidIntent) {
+		t.Errorf("Resume(bad tx) err = %v, want ErrInvalidIntent", err)
+	}
+	if err := w.Resume(testTxHash, "0xdeadbeef", 10); !errors.Is(err, chain.ErrInvalidIntent) {
+		t.Errorf("Resume(bad block hash) err = %v, want ErrInvalidIntent", err)
+	}
+}
+
+// TestWatcherFinalizesAndEvicts proves the memory bound on the otherwise-unbounded
+// tracked set: a confirmed anchor buried at least finalityDepth deep surfaces
+// exactly one terminal PhaseFinalized and is deleted, so a further poll observes
+// nothing. Guards the depth arithmetic against off-by-one at the boundary.
+func TestWatcherFinalizesAndEvicts(t *testing.T) {
+	ctx := context.Background()
+	r := newFakeReader()
+	hdr := makeHeader(10, 'a')
+	r.receiptFn = foundReceipt(10, hdr.Hash())
+	r.headerFn = staticHeader(hdr)
+	const depth, finality = 2, 5
+	w, err := NewWatcher(r, depth, finality, time.Second, testLogger())
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	if err := w.Track(testTxHash); err != nil {
+		t.Fatalf("Track: %v", err)
+	}
+
+	trackedLen := func() int {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		return len(w.tracked)
+	}
+
+	// Drive to Confirmed at depth == N.
+	r.blockNumber = 11
+	requirePhases(t, w.poll(ctx), PhaseConfirmed)
+
+	// One short of finality (depth finality-1): still tracked, nothing emitted.
+	r.blockNumber = 10 + finality - 2 // depth = finality - 1
+	requirePhases(t, w.poll(ctx))
+	if n := trackedLen(); n != 1 {
+		t.Fatalf("tracked len = %d one short of finality, want 1", n)
+	}
+
+	// One more block ⇒ depth == finality ⇒ exactly one Finalized, then evicted.
+	r.blockNumber = 10 + finality - 1 // depth = finality
+	got := w.poll(ctx)
+	requirePhases(t, got, PhaseFinalized)
+	if got[0].BlockNumber != 10 || got[0].Depth != finality {
+		t.Fatalf("finalized status = %+v, want block 10 depth %d", got[0], finality)
+	}
+	if n := trackedLen(); n != 0 {
+		t.Fatalf("tracked len = %d after finality, want 0 (evicted)", n)
+	}
+
+	// Terminal: the key is gone, so a deeper head observes nothing.
+	r.blockNumber = 100
+	requirePhases(t, w.poll(ctx))
 }
 
 // recordingSink captures every Status handed to OnStatus and can be told to return
@@ -474,7 +615,7 @@ func TestWatcherRunDispatchesToSinkAndSurvivesSinkError(t *testing.T) {
 	r.blockNumber = 10
 	r.receiptFn = foundReceipt(10, hdr.Hash())
 	r.headerFn = staticHeader(hdr)
-	w, err := NewWatcher(r, 1, time.Millisecond, testLogger()) // N=1 ⇒ confirms immediately
+	w, err := NewWatcher(r, 1, 5, time.Millisecond, testLogger()) // N=1 ⇒ confirms immediately
 	if err != nil {
 		t.Fatalf("NewWatcher: %v", err)
 	}
@@ -515,7 +656,7 @@ func TestWatcherRunDispatchesToSinkAndSurvivesSinkError(t *testing.T) {
 }
 
 func TestWatcherRunReturnsNilOnContextCancel(t *testing.T) {
-	w, err := NewWatcher(newFakeReader(), 1, time.Millisecond, testLogger())
+	w, err := NewWatcher(newFakeReader(), 1, 5, time.Millisecond, testLogger())
 	if err != nil {
 		t.Fatalf("NewWatcher: %v", err)
 	}
@@ -535,6 +676,85 @@ func TestWatcherRunReturnsNilOnContextCancel(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not return promptly after context cancel")
+	}
+}
+
+// retrySink fails the first Confirmed delivery then accepts, signalling on accepted
+// once a Confirmed comes back nil — the seam that proves the watcher retried.
+type retrySink struct {
+	mu         sync.Mutex
+	got        []Status
+	failedOnce bool
+	accepted   chan Status
+}
+
+func (s *retrySink) OnStatus(_ context.Context, st Status) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.got = append(s.got, st)
+	if st.Phase == PhaseConfirmed && !s.failedOnce {
+		s.failedOnce = true
+		return errors.New("sink: settlement write failed")
+	}
+	if st.Phase == PhaseConfirmed {
+		select {
+		case s.accepted <- st:
+		default:
+		}
+	}
+	return nil
+}
+
+// TestWatcherRunRetriesConfirmedAfterSinkError proves the Confirmed→Mined rollback:
+// when the sink rejects a Confirmed status, Run rolls the entry back to Mined and
+// clears its emit dedupe, so a later poll re-emits Confirmed and the recovered sink
+// accepts it — the settlement row is never left un-settled by a transient sink
+// failure. The internal Mined rollback never leaks to the sink (the same poll that
+// re-reads the receipt confirms in one step), so every delivered status is Confirmed.
+func TestWatcherRunRetriesConfirmedAfterSinkError(t *testing.T) {
+	r := newFakeReader()
+	hdr := makeHeader(10, 'a')
+	r.blockNumber = 10
+	r.receiptFn = foundReceipt(10, hdr.Hash())
+	r.headerFn = staticHeader(hdr)
+	w, err := NewWatcher(r, 1, 5, time.Millisecond, testLogger()) // N=1 ⇒ confirms immediately
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	if err := w.Track(testTxHash); err != nil {
+		t.Fatalf("Track: %v", err)
+	}
+
+	sink := &retrySink{accepted: make(chan Status, 4)}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx, sink) }()
+
+	select {
+	case <-sink.accepted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watcher never re-delivered Confirmed after sink error")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run returned %v after a sink retry, want nil", err)
+	}
+
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if !sink.failedOnce {
+		t.Fatal("expected the first Confirmed delivery to fail")
+	}
+	confirmed := 0
+	for _, s := range sink.got {
+		if s.Phase != PhaseConfirmed {
+			t.Fatalf("sink saw phase %s; the internal Mined rollback must not leak", s.Phase)
+		}
+		confirmed++
+	}
+	if confirmed < 2 {
+		t.Fatalf("sink saw %d Confirmed deliveries, want >= 2 (initial failure + retry)", confirmed)
 	}
 }
 
@@ -572,19 +792,25 @@ func TestRedactRPCErrorStripsEndpointURL(t *testing.T) {
 }
 
 func TestNewWatcherValidatesConfig(t *testing.T) {
-	if _, err := NewWatcher(nil, 1, time.Second, testLogger()); err == nil {
+	if _, err := NewWatcher(nil, 1, 2, time.Second, testLogger()); err == nil {
 		t.Error("nil reader accepted, want error")
 	}
-	if _, err := NewWatcher(newFakeReader(), 0, time.Second, testLogger()); err == nil {
+	if _, err := NewWatcher(newFakeReader(), 0, 2, time.Second, testLogger()); err == nil {
 		t.Error("zero depth accepted, want error")
 	}
-	if _, err := NewWatcher(newFakeReader(), 1, 0, testLogger()); err == nil {
+	if _, err := NewWatcher(newFakeReader(), 2, 2, time.Second, testLogger()); err == nil {
+		t.Error("finality depth == confirmation depth accepted, want error")
+	}
+	if _, err := NewWatcher(newFakeReader(), 3, 2, time.Second, testLogger()); err == nil {
+		t.Error("finality depth < confirmation depth accepted, want error")
+	}
+	if _, err := NewWatcher(newFakeReader(), 1, 2, 0, testLogger()); err == nil {
 		t.Error("zero interval accepted, want error")
 	}
 }
 
 func TestWatcherTrackValidatesAndIsIdempotent(t *testing.T) {
-	w, err := NewWatcher(newFakeReader(), 1, time.Second, testLogger())
+	w, err := NewWatcher(newFakeReader(), 1, 2, time.Second, testLogger())
 	if err != nil {
 		t.Fatalf("NewWatcher: %v", err)
 	}

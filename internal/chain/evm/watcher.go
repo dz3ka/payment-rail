@@ -47,6 +47,11 @@ const (
 	// the tracked entry resets to pending semantics so a re-mine is observed fresh
 	// (the reverse+reapply cycle M3 slice 2 requires).
 	PhaseReorged
+	// PhaseFinalized: buried at least the configured finality depth under the head,
+	// deep enough that a reversing reorg is treated as impossible. Terminal: the
+	// entry is evicted from the tracked map once this is surfaced, bounding the
+	// growth Confirmed's non-terminal re-verification would otherwise leave unchecked.
+	PhaseFinalized
 )
 
 // String renders the phase as a stable, lower-case label for logs and callers.
@@ -60,6 +65,8 @@ func (p Phase) String() string {
 		return "confirmed"
 	case PhaseReorged:
 		return "reorged"
+	case PhaseFinalized:
+		return "finalized"
 	default:
 		return "unknown"
 	}
@@ -106,27 +113,34 @@ type StatusSink interface {
 // the keys under the lock, does its network I/O unlocked, then re-acquires to
 // mutate — so a slow node never stalls a concurrent Track.
 type Watcher struct {
-	reader   chainReader
-	depth    uint64
-	interval time.Duration
-	log      *slog.Logger
+	reader        chainReader
+	depth         uint64
+	finalityDepth uint64
+	interval      time.Duration
+	log           *slog.Logger
 
 	mu      sync.Mutex
 	tracked map[chain.TxHash]*tracked
 }
 
 // NewWatcher validates its knobs and wires the watcher. depth is the confirmation
-// threshold N and must be >= 1 (zero confirmations is not a threshold); interval
-// is the poll cadence and must be > 0. Both are operator-supplied, so they are a
+// threshold N and must be >= 1 (zero confirmations is not a threshold);
+// finalityDepth is the deeper threshold at which a confirmed tx is treated as
+// irreversible and evicted, and must exceed depth (a finality that fires at or
+// before confirmation would evict a tx a reorg could still reverse); interval is
+// the poll cadence and must be > 0. All three are operator-supplied, so they are a
 // real trust boundary and fail loudly here rather than producing a watcher that
 // spins or never confirms. A nil logger falls back to slog.Default() (mirrors
 // NewAdapter / NewServer).
-func NewWatcher(reader chainReader, depth uint64, interval time.Duration, log *slog.Logger) (*Watcher, error) {
+func NewWatcher(reader chainReader, depth, finalityDepth uint64, interval time.Duration, log *slog.Logger) (*Watcher, error) {
 	if reader == nil {
 		return nil, errors.New("evm: watcher reader is required")
 	}
 	if depth == 0 {
 		return nil, errors.New("evm: watcher confirmation depth must be positive")
+	}
+	if finalityDepth <= depth {
+		return nil, errors.New("evm: watcher finality depth must exceed confirmation depth")
 	}
 	if interval <= 0 {
 		return nil, errors.New("evm: watcher poll interval must be positive")
@@ -135,11 +149,12 @@ func NewWatcher(reader chainReader, depth uint64, interval time.Duration, log *s
 		log = slog.Default()
 	}
 	return &Watcher{
-		reader:   reader,
-		depth:    depth,
-		interval: interval,
-		log:      log,
-		tracked:  make(map[chain.TxHash]*tracked),
+		reader:        reader,
+		depth:         depth,
+		finalityDepth: finalityDepth,
+		interval:      interval,
+		log:           log,
+		tracked:       make(map[chain.TxHash]*tracked),
 	}, nil
 }
 
@@ -157,6 +172,38 @@ func (w *Watcher) Track(tx chain.TxHash) error {
 		return nil
 	}
 	w.tracked[tx] = &tracked{phase: PhasePending}
+	return nil
+}
+
+// Resume re-registers a transaction that a prior process already observed settled,
+// seeding it as a Confirmed anchor rather than a fresh Pending track. This is the
+// crash-recovery path: a settlement row persisted as settled at (blockHash,
+// blockNumber) is re-tracked on restart so an in-flight reorg is still caught,
+// without re-emitting the settle that already landed. Seeding lastEmittedPhase =
+// PhaseConfirmed / lastEmittedDepth = w.depth means the next canonical poll dedupes
+// (no duplicate settle), while a divergent anchor still surfaces as Reorged. Both
+// hashes are caller-supplied — a recovered DB row is a trust boundary — so both are
+// validated before either reaches the map or an RPC call. Idempotent like Track:
+// re-resuming an already-tracked key is a no-op, never a reset of live state.
+func (w *Watcher) Resume(tx chain.TxHash, blockHash string, blockNumber uint64) error {
+	if !isHexTxHash(string(tx)) {
+		return fmt.Errorf("evm: resume transaction hash is not a valid 0x-hex hash: %w", chain.ErrInvalidIntent)
+	}
+	if !isHexTxHash(blockHash) {
+		return fmt.Errorf("evm: resume block hash is not a valid 0x-hex hash: %w", chain.ErrInvalidIntent)
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if _, ok := w.tracked[tx]; ok {
+		return nil
+	}
+	w.tracked[tx] = &tracked{
+		phase:            PhaseConfirmed,
+		blockHash:        common.HexToHash(blockHash),
+		blockNumber:      blockNumber,
+		lastEmittedPhase: PhaseConfirmed,
+		lastEmittedDepth: w.depth,
+	}
 	return nil
 }
 
@@ -183,6 +230,23 @@ func (w *Watcher) Run(ctx context.Context, sink StatusSink) error {
 				if err := sink.OnStatus(ctx, s); err != nil {
 					w.log.ErrorContext(ctx, "watcher: status sink failed",
 						"tx_hash", string(s.TxHash), "phase", s.Phase.String(), "error", err)
+					// A failed Confirmed delivery must be retried, or the settlement
+					// row never learns it confirmed. Roll the entry back to Mined and
+					// clear its emit dedupe so the next poll's Mined branch re-reads the
+					// receipt+header and re-emits Confirmed — no extra RPC beyond the
+					// normal tick. Guarded on phase == PhaseConfirmed so a poll that
+					// already advanced the entry (e.g. to Reorged) is never clobbered.
+					// Other failed phases (Reorged, Finalized) need no rollback: their
+					// recovery anchor is the persisted row, re-derived on the next pass.
+					if s.Phase == PhaseConfirmed {
+						w.mu.Lock()
+						if t, ok := w.tracked[s.TxHash]; ok && t.phase == PhaseConfirmed {
+							t.phase = PhaseMined
+							t.lastEmittedPhase = PhasePending // zero value: force re-emit
+							t.lastEmittedDepth = 0
+						}
+						w.mu.Unlock()
+					}
 				}
 			}
 		}
@@ -209,9 +273,9 @@ func (w *Watcher) poll(ctx context.Context) []Status {
 	// caller behind the slowest node round-trip (mirrors the adapter pricing gas
 	// outside the nonce lock). Confirmed entries are observed too: since M3 slice 2
 	// Confirmed is non-terminal, its anchor is re-verified each pass so a deep
-	// reorg can still reverse it. Tradeoff: retaining Confirmed means the tracked
-	// set grows unbounded until a finality-depth eviction is added (documented
-	// follow-up, out of scope here).
+	// reorg can still reverse it. The tracked set is bounded by the finality-depth
+	// eviction in the Confirmed branch: once an anchor is buried >= finalityDepth
+	// deep it is surfaced as PhaseFinalized and deleted.
 	w.mu.Lock()
 	keys := make([]chain.TxHash, 0, len(w.tracked))
 	for tx := range w.tracked {
@@ -354,7 +418,19 @@ func (w *Watcher) poll(ctx context.Context) []Status {
 				w.mu.Unlock()
 				continue
 			}
-			// Anchor still canonical: the confirmation holds, nothing to emit.
+			// Anchor still canonical: the confirmation holds. Once it is buried at
+			// least finalityDepth deep, a reversing reorg is treated as impossible —
+			// surface a terminal PhaseFinalized and evict the entry so the tracked set
+			// stays bounded (the growth slice-2 left as a documented follow-up). Only
+			// reachable on the canonical path: a divergent header already reversed and
+			// continued above, so finality never races a reorg. head >= bNum guards the
+			// depth subtraction against a transiently lagging head.
+			if head >= bNum && head-bNum+1 >= w.finalityDepth {
+				w.mu.Lock()
+				w.emit(t, tx, PhaseFinalized, bHash, bNum, head-bNum+1, &emitted)
+				delete(w.tracked, tx)
+				w.mu.Unlock()
+			}
 		}
 	}
 
