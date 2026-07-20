@@ -7,6 +7,12 @@ RETURNING *;
 SELECT * FROM accounts
 WHERE id = $1;
 
+-- name: GetAccountByNameAndAsset :one
+-- Resolves a seeded/house account (e.g. the onchain_settlement clearing
+-- account) by its UNIQUE (name, asset) key.
+SELECT * FROM accounts
+WHERE name = $1 AND asset = $2;
+
 -- name: GetAccountsForUpdate :many
 -- Production locking path: lock the named account rows for the duration of the
 -- surrounding transaction, ordered by id to impose a deterministic lock order

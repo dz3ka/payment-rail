@@ -14,6 +14,15 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("PAYMENT_RAIL_POSTGRES_DSN", "")
 	t.Setenv("PAYMENT_RAIL_SIGNER_GRPC_ADDR", "")
 	t.Setenv("PAYMENT_RAIL_SIGNER_KEYRING", "")
+	t.Setenv("PAYMENT_RAIL_CHAIN_RPC_URL", "")
+	t.Setenv("PAYMENT_RAIL_CHAIN_ID", "")
+	t.Setenv("PAYMENT_RAIL_CHAIN_KEY_ID", "")
+	t.Setenv("PAYMENT_RAIL_CHAIN_FROM_ADDRESS", "")
+	t.Setenv("PAYMENT_RAIL_CHAIN_USDC_ADDRESS", "")
+	t.Setenv("PAYMENT_RAIL_CHAIN_GAS_LIMIT_CAP", "")
+	t.Setenv("PAYMENT_RAIL_CHAIN_MAX_FEE_PER_GAS_CAP_WEI", "")
+	t.Setenv("PAYMENT_RAIL_WATCHER_CONFIRMATIONS", "")
+	t.Setenv("PAYMENT_RAIL_WATCHER_POLL_INTERVAL_SECONDS", "")
 
 	cfg, err := Load()
 	if err != nil {
@@ -38,6 +47,33 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.SignerKeyring != "signer.keyring.json" {
 		t.Errorf("SignerKeyring = %q, want %q", cfg.SignerKeyring, "signer.keyring.json")
 	}
+	if cfg.ChainRPCURL != "" {
+		t.Errorf("ChainRPCURL = %q, want %q", cfg.ChainRPCURL, "")
+	}
+	if cfg.ChainID != 11155111 {
+		t.Errorf("ChainID = %d, want %d", cfg.ChainID, 11155111)
+	}
+	if cfg.ChainKeyID != "" {
+		t.Errorf("ChainKeyID = %q, want %q", cfg.ChainKeyID, "")
+	}
+	if cfg.ChainFromAddress != "" {
+		t.Errorf("ChainFromAddress = %q, want %q", cfg.ChainFromAddress, "")
+	}
+	if cfg.ChainUSDCAddress != "" {
+		t.Errorf("ChainUSDCAddress = %q, want %q", cfg.ChainUSDCAddress, "")
+	}
+	if cfg.ChainGasLimitCap != 300000 {
+		t.Errorf("ChainGasLimitCap = %d, want %d", cfg.ChainGasLimitCap, 300000)
+	}
+	if cfg.ChainMaxFeePerGasCapWei != "100000000000" {
+		t.Errorf("ChainMaxFeePerGasCapWei = %q, want %q", cfg.ChainMaxFeePerGasCapWei, "100000000000")
+	}
+	if cfg.WatcherConfirmations != 12 {
+		t.Errorf("WatcherConfirmations = %d, want %d", cfg.WatcherConfirmations, 12)
+	}
+	if cfg.WatcherPollInterval != 15*time.Second {
+		t.Errorf("WatcherPollInterval = %v, want %v", cfg.WatcherPollInterval, 15*time.Second)
+	}
 }
 
 func TestLoadOverrides(t *testing.T) {
@@ -46,6 +82,15 @@ func TestLoadOverrides(t *testing.T) {
 	t.Setenv("PAYMENT_RAIL_POSTGRES_DSN", "postgres://user:pass@db:5432/other?sslmode=require")
 	t.Setenv("PAYMENT_RAIL_SIGNER_GRPC_ADDR", "0.0.0.0:7000")
 	t.Setenv("PAYMENT_RAIL_SIGNER_KEYRING", "/etc/payment-rail/keys.json")
+	t.Setenv("PAYMENT_RAIL_CHAIN_RPC_URL", "https://sepolia.example/rpc")
+	t.Setenv("PAYMENT_RAIL_CHAIN_ID", "1")
+	t.Setenv("PAYMENT_RAIL_CHAIN_KEY_ID", "payments-hot")
+	t.Setenv("PAYMENT_RAIL_CHAIN_FROM_ADDRESS", "0x1111111111111111111111111111111111111111")
+	t.Setenv("PAYMENT_RAIL_CHAIN_USDC_ADDRESS", "0x2222222222222222222222222222222222222222")
+	t.Setenv("PAYMENT_RAIL_CHAIN_GAS_LIMIT_CAP", "500000")
+	t.Setenv("PAYMENT_RAIL_CHAIN_MAX_FEE_PER_GAS_CAP_WEI", "250000000000")
+	t.Setenv("PAYMENT_RAIL_WATCHER_CONFIRMATIONS", "6")
+	t.Setenv("PAYMENT_RAIL_WATCHER_POLL_INTERVAL_SECONDS", "3")
 
 	cfg, err := Load()
 	if err != nil {
@@ -67,6 +112,49 @@ func TestLoadOverrides(t *testing.T) {
 	if cfg.SignerKeyring != "/etc/payment-rail/keys.json" {
 		t.Errorf("SignerKeyring = %q, want %q", cfg.SignerKeyring, "/etc/payment-rail/keys.json")
 	}
+	if cfg.ChainRPCURL != "https://sepolia.example/rpc" {
+		t.Errorf("ChainRPCURL = %q, want %q", cfg.ChainRPCURL, "https://sepolia.example/rpc")
+	}
+	if cfg.ChainID != 1 {
+		t.Errorf("ChainID = %d, want %d", cfg.ChainID, 1)
+	}
+	if cfg.ChainKeyID != "payments-hot" {
+		t.Errorf("ChainKeyID = %q, want %q", cfg.ChainKeyID, "payments-hot")
+	}
+	if cfg.ChainFromAddress != "0x1111111111111111111111111111111111111111" {
+		t.Errorf("ChainFromAddress = %q, want %q", cfg.ChainFromAddress, "0x1111111111111111111111111111111111111111")
+	}
+	if cfg.ChainUSDCAddress != "0x2222222222222222222222222222222222222222" {
+		t.Errorf("ChainUSDCAddress = %q, want %q", cfg.ChainUSDCAddress, "0x2222222222222222222222222222222222222222")
+	}
+	if cfg.ChainGasLimitCap != 500000 {
+		t.Errorf("ChainGasLimitCap = %d, want %d", cfg.ChainGasLimitCap, 500000)
+	}
+	if cfg.ChainMaxFeePerGasCapWei != "250000000000" {
+		t.Errorf("ChainMaxFeePerGasCapWei = %q, want %q", cfg.ChainMaxFeePerGasCapWei, "250000000000")
+	}
+	if cfg.WatcherConfirmations != 6 {
+		t.Errorf("WatcherConfirmations = %d, want %d", cfg.WatcherConfirmations, 6)
+	}
+	if cfg.WatcherPollInterval != 3*time.Second {
+		t.Errorf("WatcherPollInterval = %v, want %v", cfg.WatcherPollInterval, 3*time.Second)
+	}
+}
+
+func TestLoadInvalidWatcherConfirmations(t *testing.T) {
+	t.Setenv("PAYMENT_RAIL_WATCHER_CONFIRMATIONS", "lots")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() = nil error, want parse error for invalid watcher confirmations")
+	}
+}
+
+func TestLoadInvalidWatcherPollInterval(t *testing.T) {
+	t.Setenv("PAYMENT_RAIL_WATCHER_POLL_INTERVAL_SECONDS", "soon")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() = nil error, want parse error for invalid watcher poll interval")
+	}
 }
 
 func TestLoadInvalidTimeout(t *testing.T) {
@@ -74,5 +162,21 @@ func TestLoadInvalidTimeout(t *testing.T) {
 
 	if _, err := Load(); err == nil {
 		t.Fatal("Load() = nil error, want parse error for invalid timeout")
+	}
+}
+
+func TestLoadInvalidChainID(t *testing.T) {
+	t.Setenv("PAYMENT_RAIL_CHAIN_ID", "notanumber")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() = nil error, want parse error for invalid chain id")
+	}
+}
+
+func TestLoadInvalidGasLimitCap(t *testing.T) {
+	t.Setenv("PAYMENT_RAIL_CHAIN_GAS_LIMIT_CAP", "xyz")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() = nil error, want parse error for invalid gas limit cap")
 	}
 }

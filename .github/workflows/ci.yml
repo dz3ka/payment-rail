@@ -36,7 +36,8 @@ jobs:
         with:
           go-version: "1.24"
           cache: true
+      # golangci-lint is pinned as a go.mod tool directive (see go.mod tool
+      # block and ADR 0015), so CI runs the exact same version as `make lint`
+      # with no separate version to drift.
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
-        with:
-          version: v1.64.8
+        run: go tool golangci-lint run

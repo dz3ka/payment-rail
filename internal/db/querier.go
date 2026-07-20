@@ -15,6 +15,12 @@ type Querier interface {
 	// Guarded on status = 'completed' so a concurrent or repeated cancel matches no
 	// row and the caller sees sql.ErrNoRows instead of double-reversing.
 	CancelPayment(ctx context.Context, arg CancelPaymentParams) (Payment, error)
+	// Atomically claim due pending deliveries and push their next_attempt_at forward
+	// by a lease so a crashed/slow worker's rows are not re-claimed until the lease expires.
+	ClaimDueDeliveries(ctx context.Context, arg ClaimDueDeliveriesParams) ([]ClaimDueDeliveriesRow, error)
+	// The relay's claim scan: oldest unsent rows first, FOR UPDATE SKIP LOCKED so
+	// concurrent relay workers each grab a disjoint batch without blocking.
+	ClaimUnsentOutbox(ctx context.Context, limit int32) ([]Outbox, error)
 	// Caches the response so subsequent retries of the same key replay it verbatim.
 	CompleteIdempotencyKey(ctx context.Context, arg CompleteIdempotencyKeyParams) error
 	CreateAccount(ctx context.Context, arg CreateAccountParams) (Account, error)
@@ -22,15 +28,22 @@ type Querier interface {
 	DeleteExpiredIdempotencyKeys(ctx context.Context, createdAt time.Time) (int64, error)
 	// Releases a claim whose handler failed, so the key isn't stuck in_flight.
 	DeleteIdempotencyKey(ctx context.Context, key string) error
+	// Insert one pending delivery per active subscription matching the event type.
+	// Idempotent on redelivery via the (event_id, subscription_id) unique constraint.
+	FanOutDelivery(ctx context.Context, arg FanOutDeliveryParams) (int64, error)
 	GetAccount(ctx context.Context, id uuid.UUID) (Account, error)
 	// Derived balance: credits add, debits subtract; never stored.
 	GetAccountBalance(ctx context.Context, accountID uuid.UUID) (int64, error)
+	// Resolves a seeded/house account (e.g. the onchain_settlement clearing
+	// account) by its UNIQUE (name, asset) key.
+	GetAccountByNameAndAsset(ctx context.Context, arg GetAccountByNameAndAssetParams) (Account, error)
 	// Production locking path: lock the named account rows for the duration of the
 	// surrounding transaction, ordered by id to impose a deterministic lock order
 	// and avoid deadlocks between concurrent transfers. WP2 calls this on Querier.
 	GetAccountsForUpdate(ctx context.Context, ids []uuid.UUID) ([]Account, error)
 	GetIdempotencyKey(ctx context.Context, key string) (IdempotencyKey, error)
 	GetPayment(ctx context.Context, id uuid.UUID) (Payment, error)
+	GetSettlementByTxHash(ctx context.Context, txHash string) (Settlement, error)
 	InsertEntryLine(ctx context.Context, arg InsertEntryLineParams) (EntryLine, error)
 	// Claims a key for an in-flight request. ON CONFLICT DO NOTHING means a key that
 	// already exists returns zero rows, so the caller gets sql.ErrNoRows — that is
@@ -38,9 +51,17 @@ type Querier interface {
 	// request_hash/response rather than re-running the operation.
 	InsertIdempotencyKey(ctx context.Context, arg InsertIdempotencyKeyParams) (IdempotencyKey, error)
 	InsertJournalEntry(ctx context.Context, arg InsertJournalEntryParams) (JournalEntry, error)
+	// Appended in the same transaction as the aggregate write it describes, so the
+	// domain change and its intent-to-publish commit atomically.
+	InsertOutboxEvent(ctx context.Context, arg InsertOutboxEventParams) error
 	// Records a completed payment. status/created_at default appropriately; a
 	// canceled payment is only ever reached via CancelPayment, never inserted.
 	InsertPayment(ctx context.Context, arg InsertPaymentParams) (Payment, error)
+	// Links an on-chain tx to the payment it settles. ON CONFLICT (tx_hash) DO
+	// NOTHING means a re-submitted tx returns zero rows, so the caller gets
+	// sql.ErrNoRows — the "already linked" signal — and resolves it via
+	// GetSettlementByTxHash instead of double-inserting.
+	InsertSettlement(ctx context.Context, arg InsertSettlementParams) (Settlement, error)
 	// Keyset continuation: everything strictly older than the cursor. The row-value
 	// comparison (created_at, id) < ($1, $2) is a single index range scan over
 	// idx_payments_keyset — stable under inserts and free of OFFSET's skew.
@@ -48,6 +69,34 @@ type Querier interface {
 	// Newest-first page; the keyset cursor for the next page is the last row's
 	// (created_at, id). Matches idx_payments_keyset.
 	ListPaymentsFirstPage(ctx context.Context, limit int32) ([]Payment, error)
+	// The payments→Track feed for the chainwatcher: rows still being watched, i.e.
+	// pending (awaiting confirmation), settled (watched for reorg), or reorged
+	// (watched to re-settle once the tx re-confirms). Including 'reorged' lets a
+	// restart inside the reorg window re-seed the tx instead of losing it. 'finalized'
+	// is terminal and deliberately excluded. Ordered by created_at so the watcher
+	// processes them oldest-first.
+	ListPendingSettlements(ctx context.Context) ([]Settlement, error)
+	MarkDeliveryDeadLettered(ctx context.Context, arg MarkDeliveryDeadLetteredParams) error
+	MarkDeliveryRetry(ctx context.Context, arg MarkDeliveryRetryParams) error
+	MarkDeliverySucceeded(ctx context.Context, arg MarkDeliverySucceededParams) error
+	// Stamps a claimed batch as published; ANY($1) marks the whole batch in one
+	// round-trip after Kafka acks.
+	MarkOutboxSent(ctx context.Context, dollar_1 []uuid.UUID) (int64, error)
+	// Guarded on status = 'settled' so only a settled tx can finalize; a reorged or
+	// still-pending tx matches no row. ErrNoRows here is an idempotent no-op for the
+	// caller (already finalized, or reorged out from under the promotion).
+	MarkSettlementFinalized(ctx context.Context, txHash string) (Settlement, error)
+	// Guarded on status = 'settled' so only a previously-settled tx can be
+	// reorged; a still-pending or already-reorged tx matches no row. Clears the
+	// recorded block so a reorged row carries no stale finality provenance.
+	MarkSettlementReorged(ctx context.Context, txHash string) (Settlement, error)
+	// Guarded on status IN ('pending', 'reorged') so a concurrent or repeated
+	// settle matches no row and the caller sees sql.ErrNoRows instead of
+	// re-pointing settle_entry_id. A reorged tx that re-confirms settles again.
+	MarkSettlementSettled(ctx context.Context, arg MarkSettlementSettledParams) (Settlement, error)
+	// Re-drive every dead-lettered delivery for one subscription (operator action
+	// after fixing a broken endpoint): reset to pending, clear error, deliver now.
+	ReplayDeadLettered(ctx context.Context, subscriptionID uuid.UUID) (int64, error)
 }
 
 var _ Querier = (*Queries)(nil)

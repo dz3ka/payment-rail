@@ -1,38 +1,50 @@
-# golangci-lint configuration for Payment Rail. Kept deliberately mainstream so it
-# stays green across contributors; tighten as the codebase grows.
+# golangci-lint configuration for Payment Rail (schema v2). Kept deliberately
+# mainstream so it stays green across contributors; tighten as the codebase grows.
+# errcheck, govet, ineffassign, staticcheck and unused are enabled by default in
+# v2, so only the extra linters we opt into are listed under `enable`.
+version: "2"
 run:
-  timeout: 5m
   tests: true
-
 linters:
   enable:
-    - errcheck      # unchecked errors
-    - govet         # suspicious constructs
-    - ineffassign   # unused assignments
-    - staticcheck   # broad correctness/style analysis
-    - unused        # unused code
-    - gofmt         # formatting
-    - goimports     # import grouping/ordering
-    - misspell      # common misspellings
-    - revive        # golint successor
-    - errorlint     # %w / errors.Is/As correctness
-    - bodyclose     # http response bodies closed
-
-linters-settings:
-  errcheck:
-    # Writes to stdout/stderr in CLI help/usage paths are intentionally
-    # unchecked; failing to print usage is not an actionable error.
-    exclude-functions:
-      - fmt.Print
-      - fmt.Printf
-      - fmt.Println
-      - fmt.Fprint
-      - fmt.Fprintf
-      - fmt.Fprintln
-
-issues:
-  exclude-rules:
-    # Test helpers frequently ignore errors on cleanup; don't nag.
-    - path: _test\.go
-      linters:
-        - errcheck
+    - bodyclose      # http response bodies closed
+    - errorlint      # %w / errors.Is/As correctness
+    - misspell       # common misspellings
+    - revive         # golint successor
+  settings:
+    errcheck:
+      # Writes to stdout/stderr in CLI help/usage paths are intentionally
+      # unchecked; failing to print usage is not an actionable error.
+      exclude-functions:
+        - fmt.Print
+        - fmt.Printf
+        - fmt.Println
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      # Test helpers frequently ignore errors on cleanup; don't nag.
+      - linters:
+          - errcheck
+        path: _test\.go
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

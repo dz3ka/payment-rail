@@ -43,13 +43,14 @@ Numbering is sequential (`NNNN-kebab-title.md`). Status is one of:
 | [0007](0007-payment-ledger-tx-composition.md) | Payment → ledger tx composition & reversing-entry cancel | Accepted |
 | [0008](0008-proto-toolchain-buf.md) | Proto toolchain (buf via Go tool directives) | Accepted |
 | [0009](0009-signer-key-custody-and-spend-limits.md) | Signer key custody & per-key spend limits | Accepted |
+| [0010](0010-chain-adapter-port-and-nonce-strategy.md) | Chain-adapter port, signer-boundary isolation & nonce strategy | Accepted |
 
 ### Planned (not yet written)
 
-Numbers 0008/0009 were reassigned to the signer ADRs above; the entries below are
-renumbered to the next free slots.
+The entries below are renumbered to the next free slots (0010 was taken by the
+chain-adapter ADR above).
 
-- ADR-0010 — Transactional outbox & event schema (M4) — *renumbered from 0008*
-- ADR-0011 — Fake-chain test harness for scripted reorgs (M3) — *renumbered from 0009*
-- ADR-0012 — Signer HSM/MPC custody upgrade & mTLS caller auth (M2+) — *follow-up to
-  ADR-0009 (base custody now decided there); renumbered from 0010*
+- ADR-0011 — Transactional outbox & event schema (M4)
+- ADR-0012 — Fake-chain test harness for scripted reorgs (M3)
+- ADR-0013 — Signer HSM/MPC custody upgrade & mTLS caller auth (M2+) — *follow-up to
+  ADR-0009 (base custody now decided there)*

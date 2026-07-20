@@ -11,16 +11,26 @@ payments API. *Traditional business in the front, crypto rails in the back.*
 
 ## Status
 
-Milestone **M1 — ledger + payments API** (this cut): a double-entry ledger in
-Postgres with balances derived from history (never stored), and an idempotent
-REST payments API (`create`/`get`/`list`/`cancel`) that composes the payment and
-its journal entry in a single transaction. Concurrency safety (no overdraw under
-parallel writes) is proven under the race detector against live Postgres. See the
-[ADRs](docs/adr/) 0004–0007 for the decisions behind it.
+Milestone **M4 — event backbone: transactional outbox → Kafka + webhook delivery**
+(this cut). Building on M1's double-entry ledger and idempotent REST payments API,
+M2's network-isolated signer and EVM chain adapter, and M3's reorg-safe chain-watcher
+(poll-based confirmation-depth tracking, reorg-safe settlement effects against the
+ledger, and settlement-recovery hardening), M4 makes the event backbone real:
+
+- **Transactional outbox → Kafka** (slice 1): domain events (payment and settlement
+  lifecycle) are written to an outbox table inside the *same* Postgres transaction as
+  the state change, then a relay drains unsent rows to Kafka/Redpanda at-least-once.
+- **Webhook delivery** (slice 3): `webhookd` consumes those events and delivers
+  HMAC-SHA256-signed webhooks to subscriber endpoints — fan-out to a durable delivery
+  queue, a poll-loop worker with exponential backoff, dead-lettering after N attempts,
+  and consumer-side idempotency on the event id. `paymentrailctl replay-webhook`
+  re-drives dead-lettered deliveries after a broken endpoint is fixed.
+
+See the [ADRs](docs/adr/) for the decisions behind each milestone.
 
 ## Architecture at a glance
 
-Six binaries in one module (`cmd/` layout), external transport REST. Internal
+Seven binaries in one module (`cmd/` layout), external transport REST. Internal
 transport is gRPC as the target end state (ADR-0001), but for M1 the `api` runs
 the ledger **in-process** — payment and journal entry commit atomically in one
 Postgres transaction with no network hop (ADR-0006). Postgres owns the ledger;
@@ -32,8 +42,9 @@ Kafka (Redpanda in dev) carries domain events from M4 on.
 | `ledger` | Double-entry ledger; internal source of truth |
 | `signer` | Network-isolated key holder; signs well-formed payloads only |
 | `chainwatcher` | Per-chain confirmation tracking; reorg-safe finality |
-| `webhookd` | Signed webhook delivery with backoff and dead-lettering |
-| `paymentrailctl` | Operator CLI |
+| `outboxrelay` | Drains the transactional outbox to Kafka (at-least-once) |
+| `webhookd` | Consumes events; HMAC-signed webhook delivery with backoff + dead-letter |
+| `paymentrailctl` | Operator CLI (`submit`, `replay-webhook`) |
 
 See [`docs/architecture/`](docs/architecture/) for the C4 diagrams and
 [`docs/adr/`](docs/adr/) for the decision records.
@@ -81,9 +92,9 @@ docs/
 |-----------|-------|
 | **M0** ✅ | Repo skeleton, CI, lint, dev stack, C4, first ADRs |
 | **M1** ✅ | Ledger service + payments API with idempotency |
-| M2 | Signer + EVM chain adapter (testnet submit) |
-| M3 | Chain-watcher with confirmations + reorg handling |
-| M4 | Outbox → Kafka + webhook dispatcher |
+| **M2** ✅ | Signer + EVM chain adapter (testnet submit) |
+| **M3** ✅ | Chain-watcher with confirmations + reorg handling |
+| **M4** ✅ | Outbox → Kafka + webhook dispatcher |
 | M5 | Policy engine + audit log |
 | M6 | Reconciliation + proof-of-reserves report |
 | M7 | Chaos tests, load tests, published benchmark |

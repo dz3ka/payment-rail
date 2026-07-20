@@ -1,8 +1,9 @@
 // Command paymentrailctl is the operator CLI: submit test payments, replay
 // webhooks, trigger reconciliation, and inspect the ledger.
 //
-// M0: prints version and usage only. Real subcommands are added alongside the
-// services they drive (M1+).
+// Dispatch is deliberately a single switch on the first argument — no command
+// registry — so the entrypoint stays a thin router and each subcommand owns its
+// own flag parsing (see submit.go). --version keeps its M0 behavior.
 package main
 
 import (
@@ -14,6 +15,23 @@ import (
 )
 
 func main() {
+	// Subcommands come before flag parsing: "submit" owns its own FlagSet, so the
+	// top-level flag package must not try to interpret its flags.
+	if len(os.Args) > 1 && os.Args[1] == "submit" {
+		if err := runSubmit(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "replay-webhook" {
+		if err := runReplayWebhook(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Usage = usage
 	flag.Parse()
@@ -23,7 +41,6 @@ func main() {
 		return
 	}
 
-	// M0: no subcommands wired yet.
 	usage()
 	os.Exit(2)
 }
@@ -38,6 +55,7 @@ Flags:
   --version    print version and exit
 
 Commands:
-  (none yet — subcommands land with milestones M1+)
+  submit          sign and broadcast one payment (--to, --amount, [--asset], [--key-id])
+  replay-webhook  re-drive dead-lettered webhook deliveries for a subscription (--subscription-id <uuid>)
 `, version.String())
 }

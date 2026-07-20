@@ -6,6 +6,7 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
@@ -47,6 +48,15 @@ type JournalEntry struct {
 	CreatedAt   time.Time
 }
 
+type Outbox struct {
+	ID          uuid.UUID
+	EventType   string
+	AggregateID string
+	Payload     json.RawMessage
+	CreatedAt   time.Time
+	SentAt      sql.NullTime
+}
+
 type Payment struct {
 	ID              uuid.UUID
 	Status          string
@@ -58,4 +68,40 @@ type Payment struct {
 	ReversalEntryID uuid.NullUUID
 	CreatedAt       time.Time
 	CanceledAt      sql.NullTime
+}
+
+type Settlement struct {
+	ID                 uuid.UUID
+	PaymentID          uuid.UUID
+	TxHash             string
+	Status             string
+	SettleEntryID      uuid.NullUUID
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+	SettledBlockHash   sql.NullString
+	SettledBlockNumber sql.NullInt64
+}
+
+type WebhookDelivery struct {
+	ID             uuid.UUID
+	EventID        uuid.UUID
+	SubscriptionID uuid.UUID
+	EventType      string
+	Payload        json.RawMessage
+	Status         string
+	Attempts       int32
+	NextAttemptAt  time.Time
+	LastStatusCode sql.NullInt32
+	LastError      sql.NullString
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+type WebhookSubscription struct {
+	ID            uuid.UUID
+	Url           string
+	EventTypes    []string
+	SigningSecret string
+	Active        bool
+	CreatedAt     time.Time
 }

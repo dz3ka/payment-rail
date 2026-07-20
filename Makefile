@@ -1,6 +1,6 @@
 # Payment Rail developer Makefile. Targets assume Go 1.24+ and (for up/down) Docker.
 
-BINARIES   := api ledger signer chainwatcher webhookd paymentrailctl
+BINARIES   := api ledger signer chainwatcher outboxrelay webhookd paymentrailctl
 BIN_DIR    := bin
 
 VERSION    ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
@@ -37,7 +37,7 @@ vet:
 
 ## lint: run golangci-lint (see .golangci.yml)
 lint:
-	golangci-lint run
+	go tool golangci-lint run
 
 ## tidy: sync go.mod/go.sum
 tidy:
@@ -45,7 +45,7 @@ tidy:
 
 ## sqlc: regenerate the typed db package from db/migrations + db/query
 sqlc:
-	sqlc generate
+	go tool sqlc generate
 
 ## proto: regenerate the gRPC signer stubs from proto/ (buf + plugins via go tool)
 proto:

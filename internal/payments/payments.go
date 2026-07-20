@@ -22,7 +22,21 @@ import (
 
 	"github.com/dz3ka/payment-rail/internal/db"
 	"github.com/dz3ka/payment-rail/internal/ledger"
+	"github.com/dz3ka/payment-rail/internal/outbox"
 )
+
+// paymentEvent is the small, stable body carried in a payment.* outbox envelope's
+// "data" field: identifiers, asset/amount, and the resulting status — enough for a
+// consumer to react without re-reading the payment. It deliberately omits internal
+// ledger ids (journal_entry_id), which are not part of the public event contract.
+type paymentEvent struct {
+	ID     uuid.UUID `json:"id"`
+	Asset  string    `json:"asset"`
+	Amount int64     `json:"amount"`
+	Source uuid.UUID `json:"source_account_id"`
+	Dest   uuid.UUID `json:"dest_account_id"`
+	Status string    `json:"status"`
+}
 
 // Sentinel errors. Callers match these with errors.Is; return sites wrap them
 // with %w so context travels with the cause. Ledger sentinels
@@ -99,7 +113,24 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (db.Payment, error
 			DestAccountID:   in.DestAccountID,
 			JournalEntryID:  je.ID,
 		})
-		return err
+		if err != nil {
+			return err
+		}
+		// A fresh insert is always a real transition (pid is new each call), so
+		// emitting unconditionally here still emits exactly once per created
+		// payment, in the same tx as the row it describes.
+		return outbox.Emit(ctx, q, outbox.Event{
+			Type:        "payment.created",
+			AggregateID: pid.String(),
+			Data: paymentEvent{
+				ID:     payment.ID,
+				Asset:  payment.Asset,
+				Amount: payment.Amount,
+				Source: payment.SourceAccountID,
+				Dest:   payment.DestAccountID,
+				Status: payment.Status,
+			},
+		})
 	})
 	if err != nil {
 		return db.Payment{}, err
@@ -207,7 +238,21 @@ func (s *Service) Cancel(ctx context.Context, id uuid.UUID) (db.Payment, error) 
 			}
 			return fmt.Errorf("payments: cancel %s: %w", id, err)
 		}
-		return nil
+		// Reached only when CancelPayment flipped a completed row to canceled — a
+		// concurrent/repeated cancel returns ErrNoRows above and never gets here, so
+		// this emits exactly once per real cancellation, in the same tx.
+		return outbox.Emit(ctx, q, outbox.Event{
+			Type:        "payment.canceled",
+			AggregateID: id.String(),
+			Data: paymentEvent{
+				ID:     canceled.ID,
+				Asset:  canceled.Asset,
+				Amount: canceled.Amount,
+				Source: canceled.SourceAccountID,
+				Dest:   canceled.DestAccountID,
+				Status: canceled.Status,
+			},
+		})
 	})
 	if err != nil {
 		return db.Payment{}, err

@@ -176,6 +176,10 @@ func (q *fakeQuerier) GetPayment(context.Context, uuid.UUID) (db.Payment, error)
 	panic("fakeQuerier.GetPayment: not used by the ledger domain")
 }
 
+func (q *fakeQuerier) GetAccountByNameAndAsset(context.Context, db.GetAccountByNameAndAssetParams) (db.Account, error) {
+	panic("fakeQuerier.GetAccountByNameAndAsset: not used by the ledger domain")
+}
+
 func (q *fakeQuerier) ListPaymentsFirstPage(context.Context, int32) ([]db.Payment, error) {
 	panic("fakeQuerier.ListPaymentsFirstPage: not used by the ledger domain")
 }
@@ -206,4 +210,70 @@ func (q *fakeQuerier) DeleteIdempotencyKey(context.Context, string) error {
 
 func (q *fakeQuerier) DeleteExpiredIdempotencyKeys(context.Context, time.Time) (int64, error) {
 	panic("fakeQuerier.DeleteExpiredIdempotencyKeys: not used by the ledger domain")
+}
+
+// Settlement methods belong to the settlement service (M3 / WP2); the ledger
+// domain never calls them, so they panic like the payments/idempotency stubs.
+func (q *fakeQuerier) InsertSettlement(context.Context, db.InsertSettlementParams) (db.Settlement, error) {
+	panic("fakeQuerier.InsertSettlement: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) GetSettlementByTxHash(context.Context, string) (db.Settlement, error) {
+	panic("fakeQuerier.GetSettlementByTxHash: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) MarkSettlementSettled(context.Context, db.MarkSettlementSettledParams) (db.Settlement, error) {
+	panic("fakeQuerier.MarkSettlementSettled: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) MarkSettlementReorged(context.Context, string) (db.Settlement, error) {
+	panic("fakeQuerier.MarkSettlementReorged: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) MarkSettlementFinalized(context.Context, string) (db.Settlement, error) {
+	panic("fakeQuerier.MarkSettlementFinalized: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) ListPendingSettlements(context.Context) ([]db.Settlement, error) {
+	panic("fakeQuerier.ListPendingSettlements: not used by the ledger domain")
+}
+
+// Outbox methods belong to the event relay (M4); the ledger domain never calls
+// them, so they panic like the settlement/payments stubs above.
+func (q *fakeQuerier) InsertOutboxEvent(context.Context, db.InsertOutboxEventParams) error {
+	panic("fakeQuerier.InsertOutboxEvent: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) ClaimUnsentOutbox(context.Context, int32) ([]db.Outbox, error) {
+	panic("fakeQuerier.ClaimUnsentOutbox: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) MarkOutboxSent(context.Context, []uuid.UUID) (int64, error) {
+	panic("fakeQuerier.MarkOutboxSent: not used by the ledger domain")
+}
+
+// Webhook delivery methods belong to the webhook service; the ledger domain
+// never calls them, so they panic like the outbox/settlement stubs above.
+func (q *fakeQuerier) FanOutDelivery(context.Context, db.FanOutDeliveryParams) (int64, error) {
+	panic("fakeQuerier.FanOutDelivery: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) ClaimDueDeliveries(context.Context, db.ClaimDueDeliveriesParams) ([]db.ClaimDueDeliveriesRow, error) {
+	panic("fakeQuerier.ClaimDueDeliveries: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) MarkDeliverySucceeded(context.Context, db.MarkDeliverySucceededParams) error {
+	panic("fakeQuerier.MarkDeliverySucceeded: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) MarkDeliveryRetry(context.Context, db.MarkDeliveryRetryParams) error {
+	panic("fakeQuerier.MarkDeliveryRetry: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) MarkDeliveryDeadLettered(context.Context, db.MarkDeliveryDeadLetteredParams) error {
+	panic("fakeQuerier.MarkDeliveryDeadLettered: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) ReplayDeadLettered(context.Context, uuid.UUID) (int64, error) {
+	panic("fakeQuerier.ReplayDeadLettered: not used by the ledger domain")
 }

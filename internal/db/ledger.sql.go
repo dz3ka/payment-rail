@@ -74,6 +74,32 @@ func (q *Queries) GetAccountBalance(ctx context.Context, accountID uuid.UUID) (i
 	return balance, err
 }
 
+const getAccountByNameAndAsset = `-- name: GetAccountByNameAndAsset :one
+SELECT id, name, kind, asset, status, created_at FROM accounts
+WHERE name = $1 AND asset = $2
+`
+
+type GetAccountByNameAndAssetParams struct {
+	Name  string
+	Asset string
+}
+
+// Resolves a seeded/house account (e.g. the onchain_settlement clearing
+// account) by its UNIQUE (name, asset) key.
+func (q *Queries) GetAccountByNameAndAsset(ctx context.Context, arg GetAccountByNameAndAssetParams) (Account, error) {
+	row := q.db.QueryRowContext(ctx, getAccountByNameAndAsset, arg.Name, arg.Asset)
+	var i Account
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Kind,
+		&i.Asset,
+		&i.Status,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const getAccountsForUpdate = `-- name: GetAccountsForUpdate :many
 SELECT id, name, kind, asset, status, created_at FROM accounts
 WHERE id = ANY($1::uuid[])
