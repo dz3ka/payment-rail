@@ -42,9 +42,12 @@ WHERE tx_hash = $1 AND status = 'settled'
 RETURNING *;
 
 -- name: ListPendingSettlements :many
--- The payments→Track feed for the chainwatcher: rows still being watched,
--- i.e. pending (awaiting confirmation) or settled (watched for reorg). Ordered
--- by created_at so the watcher processes them oldest-first.
+-- The payments→Track feed for the chainwatcher: rows still being watched, i.e.
+-- pending (awaiting confirmation), settled (watched for reorg), or reorged
+-- (watched to re-settle once the tx re-confirms). Including 'reorged' lets a
+-- restart inside the reorg window re-seed the tx instead of losing it. 'finalized'
+-- is terminal and deliberately excluded. Ordered by created_at so the watcher
+-- processes them oldest-first.
 SELECT * FROM settlements
-WHERE status IN ('pending', 'settled')
+WHERE status IN ('pending', 'settled', 'reorged')
 ORDER BY created_at;

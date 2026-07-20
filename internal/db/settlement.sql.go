@@ -69,13 +69,16 @@ func (q *Queries) InsertSettlement(ctx context.Context, arg InsertSettlementPara
 
 const listPendingSettlements = `-- name: ListPendingSettlements :many
 SELECT id, payment_id, tx_hash, status, settle_entry_id, created_at, updated_at, settled_block_hash, settled_block_number FROM settlements
-WHERE status IN ('pending', 'settled')
+WHERE status IN ('pending', 'settled', 'reorged')
 ORDER BY created_at
 `
 
-// The payments→Track feed for the chainwatcher: rows still being watched,
-// i.e. pending (awaiting confirmation) or settled (watched for reorg). Ordered
-// by created_at so the watcher processes them oldest-first.
+// The payments→Track feed for the chainwatcher: rows still being watched, i.e.
+// pending (awaiting confirmation), settled (watched for reorg), or reorged
+// (watched to re-settle once the tx re-confirms). Including 'reorged' lets a
+// restart inside the reorg window re-seed the tx instead of losing it. 'finalized'
+// is terminal and deliberately excluded. Ordered by created_at so the watcher
+// processes them oldest-first.
 func (q *Queries) ListPendingSettlements(ctx context.Context) ([]Settlement, error) {
 	rows, err := q.db.QueryContext(ctx, listPendingSettlements)
 	if err != nil {

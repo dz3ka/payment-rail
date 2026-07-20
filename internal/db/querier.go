@@ -57,9 +57,12 @@ type Querier interface {
 	// Newest-first page; the keyset cursor for the next page is the last row's
 	// (created_at, id). Matches idx_payments_keyset.
 	ListPaymentsFirstPage(ctx context.Context, limit int32) ([]Payment, error)
-	// The payments→Track feed for the chainwatcher: rows still being watched,
-	// i.e. pending (awaiting confirmation) or settled (watched for reorg). Ordered
-	// by created_at so the watcher processes them oldest-first.
+	// The payments→Track feed for the chainwatcher: rows still being watched, i.e.
+	// pending (awaiting confirmation), settled (watched for reorg), or reorged
+	// (watched to re-settle once the tx re-confirms). Including 'reorged' lets a
+	// restart inside the reorg window re-seed the tx instead of losing it. 'finalized'
+	// is terminal and deliberately excluded. Ordered by created_at so the watcher
+	// processes them oldest-first.
 	ListPendingSettlements(ctx context.Context) ([]Settlement, error)
 	// Guarded on status = 'settled' so only a settled tx can finalize; a reorged or
 	// still-pending tx matches no row. ErrNoRows here is an idempotent no-op for the

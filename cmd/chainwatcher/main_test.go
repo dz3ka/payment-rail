@@ -67,6 +67,30 @@ func TestSeedTracksPendingRow(t *testing.T) {
 	}
 }
 
+// A reorged row (status 'reorged', anchor NULLed by MarkSettlementReorged) is now
+// fed to seed so a restart inside the reorg window — after detection, before the
+// tx re-confirms — keeps tracking it. It must Track as pending, never Resume: a
+// reorged tx SHOULD re-emit settle when it re-confirms (the money was reversed),
+// which the Confirmed-anchor Resume path deliberately suppresses.
+func TestSeedTracksReorgedRow(t *testing.T) {
+	spy := &spyTracker{}
+	row := db.Settlement{
+		TxHash:           "0xreorg",
+		Status:           "reorged",
+		SettledBlockHash: sql.NullString{Valid: false},
+	}
+
+	if err := seed(spy, row); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if len(spy.tracked) != 1 || spy.tracked[0] != chain.TxHash("0xreorg") {
+		t.Fatalf("want one Track of 0xreorg, got tracked=%v resumed=%v", spy.tracked, spy.resumed)
+	}
+	if len(spy.resumed) != 0 {
+		t.Fatalf("want no Resume, got %v", spy.resumed)
+	}
+}
+
 // A legacy row persisted as settled before the anchor columns existed carries a
 // NULL SettledBlockHash. It must fall to the pending Track path, not Resume with
 // a zero anchor — tracking a settled tx afresh is money-safe, resuming a bogus
