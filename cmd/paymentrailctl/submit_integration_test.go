@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 
@@ -20,6 +22,8 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient/simulated"
+	"github.com/google/uuid"
+	_ "github.com/lib/pq"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -28,6 +32,8 @@ import (
 
 	"github.com/dz3ka/payment-rail/internal/chain"
 	"github.com/dz3ka/payment-rail/internal/chain/evm"
+	"github.com/dz3ka/payment-rail/internal/db"
+	"github.com/dz3ka/payment-rail/internal/settlement"
 	"github.com/dz3ka/payment-rail/internal/signer"
 	"github.com/dz3ka/payment-rail/internal/signerpb"
 )
@@ -446,4 +452,113 @@ func TestSubmit_FullWire_SpendLimitRejectionMapsToSignerRejected(t *testing.T) {
 	if after != before {
 		t.Fatalf("sender nonce advanced from %d to %d; a rejected payment must mine nothing", before, after)
 	}
+}
+
+// TestSubmit_InvalidPaymentIDFailsFast proves the --payment-id guard rejects a
+// malformed id BEFORE any config load or network dial, so a bad id can never
+// broadcast an unlinkable transaction. It is fully hermetic: --to and --amount
+// are valid, so the only thing that can fail is the uuid parse.
+func TestSubmit_InvalidPaymentIDFailsFast(t *testing.T) {
+	err := runSubmit([]string{
+		"--to", wireRecipient.Hex(),
+		"--amount", "1000000",
+		"--payment-id", "not-a-uuid",
+	})
+	if err == nil {
+		t.Fatal("runSubmit() = nil, want an error for a malformed --payment-id")
+	}
+	if !strings.Contains(err.Error(), "payment-id") {
+		t.Fatalf("runSubmit() error = %v, want it to name --payment-id", err)
+	}
+}
+
+// TestSubmit_PaymentIDLink_Integration proves the persistence seam --payment-id
+// wires: linking a payment to a tx hash writes a settlements row queryable by
+// that hash with the right payment_id. It is DSN-gated (mirrors the other
+// *_integration tests) since it needs a live Postgres.
+//
+// It drives settlement.NewRecorder(db.New(sqlDB)) — the EXACT composition
+// runSubmit builds after a successful broadcast — rather than runSubmit itself,
+// because the full command additionally dials a live chain RPC and the isolated
+// signer, neither of which a DSN alone provides. This isolates the one part of
+// the submit path that touches Postgres, which is all WP4 added there.
+func TestSubmit_PaymentIDLink_Integration(t *testing.T) {
+	dsn := os.Getenv("PAYMENT_RAIL_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set PAYMENT_RAIL_TEST_DSN to run the settlement-link integration test")
+	}
+
+	ctx := context.Background()
+	sqlDB, err := sql.Open("postgres", dsn)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	if err := sqlDB.PingContext(ctx); err != nil {
+		t.Fatalf("ping: %v", err)
+	}
+
+	paymentID := seedPayment(ctx, t, sqlDB)
+	// A unique 32-byte 0x-hex hash per run (two uuids = 32 bytes) so repeated
+	// runs on the shared dev DB never collide on the tx_hash UNIQUE.
+	a, b := uuid.New(), uuid.New()
+	txHash := "0x" + hex.EncodeToString(a[:]) + hex.EncodeToString(b[:])
+
+	// The production composition runSubmit builds for the link step.
+	recorder := settlement.NewRecorder(db.New(sqlDB))
+	if err := recorder.Link(ctx, paymentID, txHash); err != nil {
+		t.Fatalf("Link() = %v, want nil", err)
+	}
+
+	// The settlement is now queryable by tx hash and points back at the payment.
+	sett, err := db.New(sqlDB).GetSettlementByTxHash(ctx, txHash)
+	if err != nil {
+		t.Fatalf("GetSettlementByTxHash(%s) = %v", txHash, err)
+	}
+	if sett.PaymentID != paymentID {
+		t.Fatalf("linked settlement payment_id = %s, want %s", sett.PaymentID, paymentID)
+	}
+	if sett.Status != "pending" {
+		t.Errorf("fresh settlement status = %q, want %q", sett.Status, "pending")
+	}
+
+	// Link is idempotent: a re-link of the same tx is a no-op, not a duplicate.
+	if err := recorder.Link(ctx, paymentID, txHash); err != nil {
+		t.Fatalf("second Link() = %v, want nil (idempotent)", err)
+	}
+}
+
+// seedPayment inserts the minimum FK chain a settlement needs — two accounts, a
+// journal entry, and a completed payment — via raw SQL, returning the payment
+// id. Fresh uuids keep repeated runs on the shared dev DB independent.
+func seedPayment(ctx context.Context, t *testing.T, sqlDB *sql.DB) uuid.UUID {
+	t.Helper()
+	const asset = "USDC"
+	var srcID, dstID, entryID, paymentID uuid.UUID
+	if err := sqlDB.QueryRowContext(ctx,
+		`INSERT INTO accounts (name, kind, asset) VALUES ($1, 'user', $2) RETURNING id`,
+		"src-"+uuid.NewString(), asset,
+	).Scan(&srcID); err != nil {
+		t.Fatalf("seed source account: %v", err)
+	}
+	if err := sqlDB.QueryRowContext(ctx,
+		`INSERT INTO accounts (name, kind, asset) VALUES ($1, 'user', $2) RETURNING id`,
+		"dst-"+uuid.NewString(), asset,
+	).Scan(&dstID); err != nil {
+		t.Fatalf("seed dest account: %v", err)
+	}
+	if err := sqlDB.QueryRowContext(ctx,
+		`INSERT INTO journal_entries (kind, external_ref, asset) VALUES ('payment', $1, $2) RETURNING id`,
+		uuid.NewString(), asset,
+	).Scan(&entryID); err != nil {
+		t.Fatalf("seed journal entry: %v", err)
+	}
+	if err := sqlDB.QueryRowContext(ctx,
+		`INSERT INTO payments (status, asset, amount, source_account_id, dest_account_id, journal_entry_id)
+		 VALUES ('completed', $1, 1000000, $2, $3, $4) RETURNING id`,
+		asset, srcID, dstID, entryID,
+	).Scan(&paymentID); err != nil {
+		t.Fatalf("seed payment: %v", err)
+	}
+	return paymentID
 }

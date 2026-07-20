@@ -39,9 +39,13 @@ const (
 	PhasePending Phase = iota
 	// PhaseMined: found in a block, but with fewer than the required confirmations.
 	PhaseMined
-	// PhaseConfirmed: buried under at least the configured confirmation depth. Terminal.
+	// PhaseConfirmed: buried under at least the configured confirmation depth.
+	// No longer terminal (M3 slice 2): the anchor is re-verified every pass so a
+	// deep reorg can still reverse a confirmed tx into PhaseReorged.
 	PhaseConfirmed
-	// PhaseReorged: the block it was mined in is no longer canonical. Terminal.
+	// PhaseReorged: the block it was mined in is no longer canonical. Non-terminal:
+	// the tracked entry resets to pending semantics so a re-mine is observed fresh
+	// (the reverse+reapply cycle M3 slice 2 requires).
 	PhaseReorged
 )
 
@@ -84,6 +88,15 @@ type tracked struct {
 
 	lastEmittedPhase Phase
 	lastEmittedDepth uint64
+}
+
+// StatusSink receives each Status the watcher emits. Implemented by callers
+// (e.g. cmd/chainwatcher) so evm never imports the ledger/settlement layer — the
+// dependency inversion that keeps this package chain-only. A sink error is logged
+// and swallowed by Run, never fatal: the settlement row's status is the recovery
+// anchor, so the watcher keeps polling.
+type StatusSink interface {
+	OnStatus(ctx context.Context, s Status) error
 }
 
 // Watcher polls a chainReader for the confirmation status of transactions it has
@@ -148,10 +161,13 @@ func (w *Watcher) Track(tx chain.TxHash) error {
 }
 
 // Run polls on a ticker until the context is cancelled, logging one redacted line
-// per transition surfaced by poll. It owns no channel: poll returns the
-// transitions of the pass and Run logs them inline. It returns nil on ctx.Done —
-// a cancelled watcher is a clean shutdown, not an error.
-func (w *Watcher) Run(ctx context.Context) error {
+// per transition surfaced by poll and dispatching each to the sink. It owns no
+// channel: poll returns the transitions of the pass and Run logs then forwards
+// them inline. A nil sink is log-only — exactly the slice-1 behavior. A sink error
+// is logged at error level and does NOT stop the loop: the watcher must keep
+// observing (the settlement row is the recovery anchor for a dropped status). It
+// returns nil on ctx.Done — a cancelled watcher is a clean shutdown, not an error.
+func (w *Watcher) Run(ctx context.Context, sink StatusSink) error {
 	ticker := time.NewTicker(w.interval)
 	defer ticker.Stop()
 	for {
@@ -161,6 +177,13 @@ func (w *Watcher) Run(ctx context.Context) error {
 		case <-ticker.C:
 			for _, s := range w.poll(ctx) {
 				w.logStatus(ctx, s)
+				if sink == nil {
+					continue
+				}
+				if err := sink.OnStatus(ctx, s); err != nil {
+					w.log.ErrorContext(ctx, "watcher: status sink failed",
+						"tx_hash", string(s.TxHash), "phase", s.Phase.String(), "error", err)
+				}
 			}
 		}
 	}
@@ -181,23 +204,22 @@ func (w *Watcher) poll(ctx context.Context) []Status {
 		return nil
 	}
 
-	// Snapshot the non-terminal keys under the lock, then do all RPC OUTSIDE it —
+	// Snapshot every tracked key under the lock, then do all RPC OUTSIDE it —
 	// holding the mutex across network I/O would serialize Track and pin every
 	// caller behind the slowest node round-trip (mirrors the adapter pricing gas
-	// outside the nonce lock).
+	// outside the nonce lock). Confirmed entries are observed too: since M3 slice 2
+	// Confirmed is non-terminal, its anchor is re-verified each pass so a deep
+	// reorg can still reverse it. Tradeoff: retaining Confirmed means the tracked
+	// set grows unbounded until a finality-depth eviction is added (documented
+	// follow-up, out of scope here).
 	w.mu.Lock()
 	keys := make([]chain.TxHash, 0, len(w.tracked))
-	for tx, t := range w.tracked {
-		if t.phase == PhasePending || t.phase == PhaseMined {
-			keys = append(keys, tx)
-		}
+	for tx := range w.tracked {
+		keys = append(keys, tx)
 	}
 	w.mu.Unlock()
 
-	var (
-		emitted  []Status
-		terminal []chain.TxHash
-	)
+	var emitted []Status
 
 	for _, tx := range keys {
 		w.mu.Lock()
@@ -241,7 +263,6 @@ func (w *Watcher) poll(ctx context.Context) []Status {
 				t.phase = PhaseConfirmed
 				w.emit(t, tx, PhaseConfirmed, receipt.BlockHash, h, depth, &emitted)
 				w.mu.Unlock()
-				terminal = append(terminal, tx)
 				continue
 			}
 			t.phase = PhaseMined
@@ -254,10 +275,8 @@ func (w *Watcher) poll(ctx context.Context) []Status {
 				if errors.Is(err, ethereum.NotFound) {
 					// The receipt is gone: the block it was in is no longer canonical.
 					w.mu.Lock()
-					t.phase = PhaseReorged
-					w.emit(t, tx, PhaseReorged, bHash, bNum, 0, &emitted)
+					w.reverse(t, tx, bHash, bNum, &emitted)
 					w.mu.Unlock()
-					terminal = append(terminal, tx)
 					continue
 				}
 				w.log.WarnContext(ctx, "watcher: receipt query failed", "tx_hash", string(tx), "error", RedactRPCError(err))
@@ -278,10 +297,8 @@ func (w *Watcher) poll(ctx context.Context) []Status {
 				// The canonical block at our recorded height is a different block:
 				// the tx was re-organized onto another chain.
 				w.mu.Lock()
-				t.phase = PhaseReorged
-				w.emit(t, tx, PhaseReorged, bHash, bNum, 0, &emitted)
+				w.reverse(t, tx, bHash, bNum, &emitted)
 				w.mu.Unlock()
-				terminal = append(terminal, tx)
 				continue
 			}
 			if head < bNum {
@@ -293,24 +310,72 @@ func (w *Watcher) poll(ctx context.Context) []Status {
 				t.phase = PhaseConfirmed
 				w.emit(t, tx, PhaseConfirmed, bHash, bNum, depth, &emitted)
 				w.mu.Unlock()
-				terminal = append(terminal, tx)
 				continue
 			}
 			// Still mined, deeper than before: emit only if the depth actually grew.
 			w.mu.Lock()
 			w.emit(t, tx, PhaseMined, bHash, bNum, depth, &emitted)
 			w.mu.Unlock()
+
+		case PhaseConfirmed:
+			// Confirmed is non-terminal: re-verify the anchor every pass so a deep
+			// reorg can still reverse a confirmed tx. Steady state emits nothing —
+			// the confirmation was already surfaced, and depth climbing further is
+			// not a new transition — so only positive evidence the tx left the
+			// canonical chain (a vanished receipt or a divergent canonical header)
+			// emits again, as Reorged. A transient read failure is never that
+			// evidence: it is logged and skipped, preserving the ADR-0012 invariant
+			// that a transport fault never manufactures a Reorged.
+			receipt, err := w.reader.TransactionReceipt(ctx, hash)
+			if err != nil {
+				if errors.Is(err, ethereum.NotFound) {
+					w.mu.Lock()
+					w.reverse(t, tx, bHash, bNum, &emitted)
+					w.mu.Unlock()
+					continue
+				}
+				w.log.WarnContext(ctx, "watcher: receipt query failed", "tx_hash", string(tx), "error", RedactRPCError(err))
+				continue // transient: a transport fault is NOT a reorg
+			}
+			if receipt == nil {
+				continue
+			}
+			hdr, err := w.reader.HeaderByNumber(ctx, new(big.Int).SetUint64(bNum))
+			if err != nil {
+				w.log.WarnContext(ctx, "watcher: header query failed", "tx_hash", string(tx), "error", RedactRPCError(err))
+				continue // transient: NOT a reorg
+			}
+			if hdr == nil {
+				continue
+			}
+			if hdr.Hash() != bHash {
+				w.mu.Lock()
+				w.reverse(t, tx, bHash, bNum, &emitted)
+				w.mu.Unlock()
+				continue
+			}
+			// Anchor still canonical: the confirmation holds, nothing to emit.
 		}
 	}
 
-	if len(terminal) > 0 {
-		w.mu.Lock()
-		for _, tx := range terminal {
-			delete(w.tracked, tx)
-		}
-		w.mu.Unlock()
-	}
 	return emitted
+}
+
+// reverse records a reorg of a tracked tx: it emits Reorged against the old anchor
+// then resets the entry to Pending semantics — clearing the block anchor and (via
+// emit) leaving lastEmittedPhase=PhaseReorged / lastEmittedDepth=0 — so a
+// subsequent re-mine is observed fresh as Mined→Confirmed. This is what makes
+// Confirmed/Reorged non-terminal: the tx keeps being watched across a
+// reverse+reapply cycle instead of being dropped from the tracked map. Callers
+// hold w.mu. It is only ever reached on positive evidence the tx left the
+// canonical chain (a vanished receipt or a divergent canonical header), never on a
+// transient read failure — preserving the ADR-0012 no-reorg-on-transport-fault
+// invariant.
+func (w *Watcher) reverse(t *tracked, tx chain.TxHash, bHash common.Hash, bNum uint64, out *[]Status) {
+	w.emit(t, tx, PhaseReorged, bHash, bNum, 0, out)
+	t.phase = PhasePending
+	t.blockHash = common.Hash{}
+	t.blockNumber = 0
 }
 
 // emit appends a Status only when it represents a real transition — a phase

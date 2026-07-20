@@ -14,14 +14,16 @@ import (
 	"github.com/dz3ka/payment-rail/internal/chain"
 )
 
-// TestWatcherDetectsReorgOnSimulatedBackend proves the reorg path end-to-end
-// against go-ethereum's in-memory EVM — a genuine chain, not a scripted
-// fakeReader. It mines a real signed transaction into a block, lets the watcher
-// observe it as Mined, then forks the chain from before that block and extends
-// the side chain until it is canonical. On the next poll the tx's block is no
-// longer canonical, so the watcher must surface PhaseReorged. Fully hermetic:
-// no env gate, no network — the whole reorg happens in process.
-func TestWatcherDetectsReorgOnSimulatedBackend(t *testing.T) {
+// TestWatcherReversesAndReappliesOnSimulatedBackend proves the full M3 slice-2
+// reverse+reapply cycle end-to-end against go-ethereum's in-memory EVM — a genuine
+// chain, not a scripted fakeReader. It mines a real signed transaction, lets the
+// watcher observe it Mined then Confirmed, then forks the chain from before that
+// block and extends the side chain until it is canonical. The simulated backend
+// re-injects the evicted tx into the pool, so it is re-mined on the new canonical
+// chain. The watcher must therefore surface PhaseReorged (the confirmation is no
+// longer terminal) and then a fresh PhaseConfirmed anchored to the NEW block hash.
+// Fully hermetic: no env gate, no network — the whole reorg happens in process.
+func TestWatcherReversesAndReappliesOnSimulatedBackend(t *testing.T) {
 	ctx := context.Background()
 
 	priv, err := crypto.GenerateKey()
@@ -66,8 +68,8 @@ func TestWatcherDetectsReorgOnSimulatedBackend(t *testing.T) {
 	}
 	backend.Commit() // block 1 seals the tx
 
-	// Deep N so the tx stays Mined (never confirms) across the reorg window.
-	w, err := NewWatcher(client, 10, time.Second, testLogger())
+	// N=2 so the tx confirms after one further block and re-confirms after the reorg.
+	w, err := NewWatcher(client, 2, time.Second, testLogger())
 	if err != nil {
 		t.Fatalf("NewWatcher: %v", err)
 	}
@@ -76,28 +78,56 @@ func TestWatcherDetectsReorgOnSimulatedBackend(t *testing.T) {
 		t.Fatalf("Track: %v", err)
 	}
 
-	// The watcher sees the tx mined and canonical.
+	// The watcher sees the tx mined and canonical at block 1 (depth 1 < N).
 	got := w.poll(ctx)
 	requirePhases(t, got, PhaseMined)
 	if got[0].BlockNumber != 1 {
 		t.Fatalf("mined at block %d, want 1", got[0].BlockNumber)
 	}
 
+	// One more block ⇒ depth 2 == N ⇒ Confirmed on the original chain.
+	backend.Commit() // block 2
+	confirmed := w.poll(ctx)
+	requirePhases(t, confirmed, PhaseConfirmed)
+	oldBlockHash := confirmed[0].BlockHash
+
 	// Reorg: branch from before block 1 and extend the side chain until it is
-	// STRICTLY longer than the original (length 2 > 1). A side chain only becomes
-	// canonical once longer, so two commits guarantee the switch deterministically
-	// (equal length is only a probabilistic flip) and evict the tx's block 1.
+	// STRICTLY longer than the 2-block main chain (three commits ⇒ length 3 > 2).
+	// A side chain only becomes canonical once longer, so this switch is
+	// deterministic and evicts the tx's block 1. The backend re-injects the evicted
+	// tx into the pool, so the first side-chain block re-mines it.
 	if err := backend.Fork(forkParent.Hash()); err != nil {
 		t.Fatalf("Fork: %v", err)
 	}
 	backend.Commit()
 	backend.Commit()
+	backend.Commit()
 
-	// The tx's recorded block is no longer canonical ⇒ Reorged (detected either
-	// by the receipt disappearing or by the canonical block at height 1 having a
-	// different hash — both routes land here).
-	requirePhases(t, w.poll(ctx), PhaseReorged)
+	// Poll the cycle to completion: the confirmed anchor diverges ⇒ PhaseReorged
+	// (the entry resets to pending), then the re-mined tx is observed afresh and,
+	// already buried >= N deep on the new chain, re-confirms with the NEW block
+	// hash. Confirmed is no longer terminal, so both emits are surfaced.
+	var phases []Phase
+	var reappliedHash string
+	for i := 0; i < 5; i++ {
+		for _, s := range w.poll(ctx) {
+			phases = append(phases, s.Phase)
+			if s.Phase == PhaseConfirmed {
+				reappliedHash = s.BlockHash
+			}
+		}
+		if len(phases) > 0 && phases[len(phases)-1] == PhaseConfirmed {
+			break
+		}
+	}
 
-	// Terminal: the tx is dropped from tracking, so further polls are silent.
-	requirePhases(t, w.poll(ctx))
+	if len(phases) < 2 || phases[0] != PhaseReorged || phases[len(phases)-1] != PhaseConfirmed {
+		t.Fatalf("phase sequence = %v, want [reorged ... confirmed]", phases)
+	}
+	if reappliedHash == "" {
+		t.Fatal("reapplied confirmation carried no block hash")
+	}
+	if reappliedHash == oldBlockHash {
+		t.Fatalf("reapplied confirmation reused the evicted block hash %s; want the new canonical block", oldBlockHash)
+	}
 }

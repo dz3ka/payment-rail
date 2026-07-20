@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -13,12 +14,16 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/google/uuid"
+	_ "github.com/lib/pq"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/dz3ka/payment-rail/internal/chain"
 	"github.com/dz3ka/payment-rail/internal/chain/evm"
 	"github.com/dz3ka/payment-rail/internal/config"
+	"github.com/dz3ka/payment-rail/internal/db"
+	"github.com/dz3ka/payment-rail/internal/settlement"
 	"github.com/dz3ka/payment-rail/internal/signerpb"
 )
 
@@ -37,6 +42,10 @@ func runSubmit(args []string) error {
 		amountFlag = fs.String("amount", "", "amount in the asset's smallest unit, decimal integer (required)")
 		assetFlag  = fs.String("asset", "USDC", "asset symbol")
 		keyIDFlag  = fs.String("key-id", "", "signer key id (default: PAYMENT_RAIL_CHAIN_KEY_ID)")
+		// Optional: when set, the payment↔tx-hash link is persisted after a
+		// successful broadcast so the chainwatcher can settle it. Empty keeps the
+		// legacy behavior — print the hash and never touch Postgres.
+		paymentIDFlag = fs.String("payment-id", "", "ledger payment id (uuid) to link this settlement to (optional)")
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -56,6 +65,17 @@ func runSubmit(args []string) error {
 	}
 	if amount.Sign() <= 0 {
 		return errors.New("submit: --amount must be positive")
+	}
+
+	// Validate --payment-id up front, before any config load or network dial: a
+	// malformed id must fail fast and never broadcast an unlinkable transaction.
+	var paymentID uuid.UUID
+	if *paymentIDFlag != "" {
+		parsed, err := uuid.Parse(*paymentIDFlag)
+		if err != nil {
+			return fmt.Errorf("submit: --payment-id %q is not a valid uuid: %w", *paymentIDFlag, err)
+		}
+		paymentID = parsed
 	}
 
 	cfg, err := config.Load()
@@ -147,5 +167,22 @@ func runSubmit(args []string) error {
 	}
 
 	fmt.Println(txHash)
+
+	// With no --payment-id this is where the command ends: hash printed, Postgres
+	// untouched — the legacy contract. With one, persist the payment↔tx-hash link
+	// so the chainwatcher can settle it once the tx confirms.
+	if *paymentIDFlag != "" {
+		sqlDB, err := sql.Open("postgres", cfg.DatabaseURL)
+		if err != nil {
+			return fmt.Errorf("submit: tx %s broadcast succeeded but linking to payment %s failed: open database: %w", txHash, paymentID, err)
+		}
+		defer func() { _ = sqlDB.Close() }()
+
+		recorder := settlement.NewRecorder(db.New(sqlDB))
+		if err := recorder.Link(ctx, paymentID, string(txHash)); err != nil {
+			return fmt.Errorf("submit: tx %s broadcast succeeded but linking to payment %s failed — reconcile manually: %w", txHash, paymentID, err)
+		}
+		fmt.Printf("linked settlement: payment %s -> %s\n", paymentID, txHash)
+	}
 	return nil
 }

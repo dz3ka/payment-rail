@@ -59,3 +59,13 @@ type Payment struct {
 	CreatedAt       time.Time
 	CanceledAt      sql.NullTime
 }
+
+type Settlement struct {
+	ID            uuid.UUID
+	PaymentID     uuid.UUID
+	TxHash        string
+	Status        string
+	SettleEntryID uuid.NullUUID
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}

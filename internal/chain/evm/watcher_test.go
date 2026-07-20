@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -154,7 +155,9 @@ func TestWatcherDrivesPendingToConfirmed(t *testing.T) {
 		t.Fatalf("confirmed depth = %d, want 3", got[0].Depth)
 	}
 
-	// Pass 5: terminal ⇒ dropped ⇒ silent.
+	// Pass 5: confirmed steady state — the anchor is re-verified and still
+	// canonical, so no new transition is surfaced (confirmed is non-terminal now,
+	// but re-emitting at a deeper depth would be spam).
 	requirePhases(t, w.poll(ctx))
 }
 
@@ -264,9 +267,10 @@ func TestWatcherFlagsReorgOnReceiptDisappearance(t *testing.T) {
 	r.receiptFn = notFoundReceipt
 	requirePhases(t, w.poll(ctx), PhaseReorged)
 
-	// Terminal: no further emits, even if a receipt reappears.
+	// Reorg is non-terminal: the entry reset to pending semantics, so a reappearing
+	// receipt is observed fresh as Mined again (the reverse+reapply cycle).
 	r.receiptFn = foundReceipt(10, hdr.Hash())
-	requirePhases(t, w.poll(ctx))
+	requirePhases(t, w.poll(ctx), PhaseMined)
 }
 
 func TestWatcherFlagsReorgOnCanonicalHashChange(t *testing.T) {
@@ -288,11 +292,18 @@ func TestWatcherFlagsReorgOnCanonicalHashChange(t *testing.T) {
 
 	// The canonical block at height 10 is now a different block (receipt still
 	// reports the old block hash, but the chain has moved).
-	r.headerFn = staticHeader(makeHeader(10, 'b'))
+	newHdr := makeHeader(10, 'b')
+	r.headerFn = staticHeader(newHdr)
 	requirePhases(t, w.poll(ctx), PhaseReorged)
 
-	// Terminal.
-	requirePhases(t, w.poll(ctx))
+	// Reorg is non-terminal: the tx re-mines on the new canonical block and is
+	// observed fresh as Mined again, now anchored to the new block hash.
+	r.receiptFn = foundReceipt(10, newHdr.Hash())
+	got := w.poll(ctx)
+	requirePhases(t, got, PhaseMined)
+	if got[0].BlockHash != newHdr.Hash().Hex() {
+		t.Fatalf("reapplied mined block hash = %s, want %s", got[0].BlockHash, newHdr.Hash().Hex())
+	}
 }
 
 func TestWatcherIgnoresTransientRPCError(t *testing.T) {
@@ -329,6 +340,180 @@ func TestWatcherIgnoresTransientRPCError(t *testing.T) {
 	requirePhases(t, w.poll(ctx), PhaseConfirmed)
 }
 
+// TestWatcherReversesAndReapplies is the core M3 slice-2 behavior: a tx that
+// reaches Confirmed is no longer terminal, so a reorg reverses it back to pending
+// and a re-mine on the new canonical chain re-confirms it. The emitted phase
+// sequence across the lifecycle must be exactly mine → confirm → reorg → re-mine →
+// re-confirm, with each Status carrying the block hash of the chain it observed.
+func TestWatcherReversesAndReapplies(t *testing.T) {
+	ctx := context.Background()
+	r := newFakeReader()
+	hdrA := makeHeader(10, 'a')
+	w, err := NewWatcher(r, 2, time.Second, testLogger()) // N=2
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	if err := w.Track(testTxHash); err != nil {
+		t.Fatalf("Track: %v", err)
+	}
+
+	var got []Status
+	step := func() { got = append(got, w.poll(ctx)...) }
+
+	// Mine at block 10 (depth 1 < N ⇒ Mined).
+	r.blockNumber = 10
+	r.receiptFn = foundReceipt(10, hdrA.Hash())
+	r.headerFn = staticHeader(hdrA)
+	step()
+
+	// Head advances ⇒ depth 2 == N ⇒ Confirmed.
+	r.blockNumber = 11
+	step()
+
+	// Reorg: the confirmed block's receipt vanishes ⇒ Reorged, entry reset to pending.
+	r.receiptFn = notFoundReceipt
+	step()
+
+	// Re-mine on the new canonical block 12 (a different hash) ⇒ Mined afresh.
+	hdrB := makeHeader(12, 'b')
+	r.blockNumber = 12
+	r.receiptFn = foundReceipt(12, hdrB.Hash())
+	r.headerFn = staticHeader(hdrB)
+	step()
+
+	// Head advances again ⇒ depth 2 == N ⇒ Confirmed on the new chain.
+	r.blockNumber = 13
+	step()
+
+	requirePhases(t, got, PhaseMined, PhaseConfirmed, PhaseReorged, PhaseMined, PhaseConfirmed)
+
+	// The reorg emit carries the OLD anchor (hash A); the re-mine/re-confirm carry
+	// the NEW block hash (B).
+	wantHash := []string{
+		hdrA.Hash().Hex(), // Mined  @10
+		hdrA.Hash().Hex(), // Confirmed @10
+		hdrA.Hash().Hex(), // Reorged (old anchor)
+		hdrB.Hash().Hex(), // Mined  @12
+		hdrB.Hash().Hex(), // Confirmed @12
+	}
+	for i, wh := range wantHash {
+		if got[i].BlockHash != wh {
+			t.Fatalf("status[%d] (%s) block hash = %s, want %s", i, got[i].Phase, got[i].BlockHash, wh)
+		}
+	}
+}
+
+// TestWatcherConfirmedIgnoresTransientRPCError preserves the ADR-0012 invariant in
+// the newly non-terminal confirmed state: a transport fault while re-verifying a
+// confirmed tx's anchor must never be mistaken for a reorg. Only positive evidence
+// (a vanished receipt) reverses it.
+func TestWatcherConfirmedIgnoresTransientRPCError(t *testing.T) {
+	ctx := context.Background()
+	r := newFakeReader()
+	hdr := makeHeader(10, 'a')
+	r.receiptFn = foundReceipt(10, hdr.Hash())
+	r.headerFn = staticHeader(hdr)
+	w, err := NewWatcher(r, 1, time.Second, testLogger()) // N=1 ⇒ confirms on first sighting
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	if err := w.Track(testTxHash); err != nil {
+		t.Fatalf("Track: %v", err)
+	}
+
+	r.blockNumber = 10
+	requirePhases(t, w.poll(ctx), PhaseConfirmed)
+
+	boom := errors.New("rpc: connection reset")
+
+	// Receipt transport error in the confirmed state must NOT reverse the tx.
+	r.receiptFn = func(context.Context, common.Hash) (*types.Receipt, error) { return nil, boom }
+	requirePhases(t, w.poll(ctx))
+
+	// Header transport error likewise leaves the confirmation intact.
+	r.receiptFn = foundReceipt(10, hdr.Hash())
+	r.headerFn = func(context.Context, *big.Int) (*types.Header, error) { return nil, boom }
+	requirePhases(t, w.poll(ctx))
+
+	// Recovered and still canonical ⇒ steady state, nothing to emit.
+	r.headerFn = staticHeader(hdr)
+	requirePhases(t, w.poll(ctx))
+
+	// A genuine reorg after the blips still reverses it.
+	r.receiptFn = notFoundReceipt
+	requirePhases(t, w.poll(ctx), PhaseReorged)
+}
+
+// recordingSink captures every Status handed to OnStatus and can be told to return
+// an error, to prove Run keeps polling past a sink failure rather than dying.
+type recordingSink struct {
+	mu     sync.Mutex
+	got    []Status
+	err    error
+	notify chan struct{}
+}
+
+func (s *recordingSink) OnStatus(_ context.Context, st Status) error {
+	s.mu.Lock()
+	s.got = append(s.got, st)
+	err := s.err
+	s.mu.Unlock()
+	select {
+	case s.notify <- struct{}{}:
+	default:
+	}
+	return err
+}
+
+// TestWatcherRunDispatchesToSinkAndSurvivesSinkError proves the StatusSink seam:
+// Run forwards each emitted Status to the sink, and a sink error is logged, not
+// fatal — the loop keeps running and shuts down cleanly on cancel.
+func TestWatcherRunDispatchesToSinkAndSurvivesSinkError(t *testing.T) {
+	r := newFakeReader()
+	hdr := makeHeader(10, 'a')
+	r.blockNumber = 10
+	r.receiptFn = foundReceipt(10, hdr.Hash())
+	r.headerFn = staticHeader(hdr)
+	w, err := NewWatcher(r, 1, time.Millisecond, testLogger()) // N=1 ⇒ confirms immediately
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	if err := w.Track(testTxHash); err != nil {
+		t.Fatalf("Track: %v", err)
+	}
+
+	sink := &recordingSink{err: errors.New("sink: settlement down"), notify: make(chan struct{}, 8)}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx, sink) }()
+
+	// The confirmed status must reach the sink.
+	select {
+	case <-sink.notify:
+	case <-time.After(2 * time.Second):
+		t.Fatal("sink never received a status")
+	}
+
+	cancel()
+	// Even though the sink returned an error on that dispatch, Run must have kept
+	// polling and return nil (clean shutdown) on cancel — a sink error is not fatal.
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run returned %v after a sink error, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after context cancel")
+	}
+
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if len(sink.got) == 0 || sink.got[0].Phase != PhaseConfirmed {
+		t.Fatalf("sink statuses = %v, want a leading Confirmed", phasesOf(sink.got))
+	}
+}
+
 func TestWatcherRunReturnsNilOnContextCancel(t *testing.T) {
 	w, err := NewWatcher(newFakeReader(), 1, time.Millisecond, testLogger())
 	if err != nil {
@@ -340,7 +525,7 @@ func TestWatcherRunReturnsNilOnContextCancel(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- w.Run(ctx) }()
+	go func() { done <- w.Run(ctx, nil) }() // nil sink: log-only, the slice-1 path
 	cancel()
 
 	select {

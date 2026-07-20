@@ -25,12 +25,16 @@ type Querier interface {
 	GetAccount(ctx context.Context, id uuid.UUID) (Account, error)
 	// Derived balance: credits add, debits subtract; never stored.
 	GetAccountBalance(ctx context.Context, accountID uuid.UUID) (int64, error)
+	// Resolves a seeded/house account (e.g. the onchain_settlement clearing
+	// account) by its UNIQUE (name, asset) key.
+	GetAccountByNameAndAsset(ctx context.Context, arg GetAccountByNameAndAssetParams) (Account, error)
 	// Production locking path: lock the named account rows for the duration of the
 	// surrounding transaction, ordered by id to impose a deterministic lock order
 	// and avoid deadlocks between concurrent transfers. WP2 calls this on Querier.
 	GetAccountsForUpdate(ctx context.Context, ids []uuid.UUID) ([]Account, error)
 	GetIdempotencyKey(ctx context.Context, key string) (IdempotencyKey, error)
 	GetPayment(ctx context.Context, id uuid.UUID) (Payment, error)
+	GetSettlementByTxHash(ctx context.Context, txHash string) (Settlement, error)
 	InsertEntryLine(ctx context.Context, arg InsertEntryLineParams) (EntryLine, error)
 	// Claims a key for an in-flight request. ON CONFLICT DO NOTHING means a key that
 	// already exists returns zero rows, so the caller gets sql.ErrNoRows — that is
@@ -41,6 +45,11 @@ type Querier interface {
 	// Records a completed payment. status/created_at default appropriately; a
 	// canceled payment is only ever reached via CancelPayment, never inserted.
 	InsertPayment(ctx context.Context, arg InsertPaymentParams) (Payment, error)
+	// Links an on-chain tx to the payment it settles. ON CONFLICT (tx_hash) DO
+	// NOTHING means a re-submitted tx returns zero rows, so the caller gets
+	// sql.ErrNoRows — the "already linked" signal — and resolves it via
+	// GetSettlementByTxHash instead of double-inserting.
+	InsertSettlement(ctx context.Context, arg InsertSettlementParams) (Settlement, error)
 	// Keyset continuation: everything strictly older than the cursor. The row-value
 	// comparison (created_at, id) < ($1, $2) is a single index range scan over
 	// idx_payments_keyset — stable under inserts and free of OFFSET's skew.
@@ -48,6 +57,17 @@ type Querier interface {
 	// Newest-first page; the keyset cursor for the next page is the last row's
 	// (created_at, id). Matches idx_payments_keyset.
 	ListPaymentsFirstPage(ctx context.Context, limit int32) ([]Payment, error)
+	// The payments→Track feed for the chainwatcher: rows still being watched,
+	// i.e. pending (awaiting confirmation) or settled (watched for reorg). Ordered
+	// by created_at so the watcher processes them oldest-first.
+	ListPendingSettlements(ctx context.Context) ([]Settlement, error)
+	// Guarded on status = 'settled' so only a previously-settled tx can be
+	// reorged; a still-pending or already-reorged tx matches no row.
+	MarkSettlementReorged(ctx context.Context, txHash string) (Settlement, error)
+	// Guarded on status IN ('pending', 'reorged') so a concurrent or repeated
+	// settle matches no row and the caller sees sql.ErrNoRows instead of
+	// re-pointing settle_entry_id. A reorged tx that re-confirms settles again.
+	MarkSettlementSettled(ctx context.Context, arg MarkSettlementSettledParams) (Settlement, error)
 }
 
 var _ Querier = (*Queries)(nil)

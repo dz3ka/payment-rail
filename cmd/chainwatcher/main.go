@@ -2,22 +2,28 @@
 // ledger effects at a configurable confirmation depth, and detects reorgs to
 // roll back and reapply those effects correctly.
 //
-// M3 slice 1: dials the configured EVM node and runs the confirmation/reorg
-// watcher against it. The feed of broadcast transactions to Track (from the
-// payments path) arrives in a later slice; until then the watcher runs against
-// an empty tracking set so the wiring, config, and shutdown path are real.
+// M3 slice 2: dials the configured EVM node and runs the confirmation/reorg
+// watcher against it, feeding every emitted Status into the settlement Sink so
+// confirmations and reorgs become ledger truth. The tracking set is seeded at
+// startup from the settlements still pending in Postgres (see below).
 package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 
 	"github.com/ethereum/go-ethereum/ethclient"
+	_ "github.com/lib/pq"
 
+	"github.com/dz3ka/payment-rail/internal/chain"
 	"github.com/dz3ka/payment-rail/internal/chain/evm"
 	"github.com/dz3ka/payment-rail/internal/config"
+	"github.com/dz3ka/payment-rail/internal/db"
+	"github.com/dz3ka/payment-rail/internal/ledger"
 	"github.com/dz3ka/payment-rail/internal/service"
+	"github.com/dz3ka/payment-rail/internal/settlement"
 )
 
 func main() {
@@ -50,6 +56,40 @@ func main() {
 			"confirmations", cfg.WatcherConfirmations,
 			"poll_interval", cfg.WatcherPollInterval.String(),
 		)
-		return w.Run(ctx)
+
+		// The ledger DB backs both effects the watcher now drives: the Sink posts
+		// settlement/reversal entries through it, and the Track feed below is
+		// seeded from the settlements it still holds as pending.
+		sqlDB, err := sql.Open("postgres", cfg.DatabaseURL)
+		if err != nil {
+			return fmt.Errorf("chainwatcher: open database: %w", err)
+		}
+		defer sqlDB.Close()
+
+		sink := settlement.NewSink(ledger.NewSQLStore(sqlDB), log)
+
+		// Seed the tracking set ONCE, at startup, from the settlements still
+		// pending. KNOWN LIMITATION: payments submitted while chainwatcher is
+		// already running are not picked up until the next restart. A periodic
+		// re-scan is a documented follow-up — it must wait until the watcher's
+		// `tracked` map is made concurrency-safe, since a parallel Track would
+		// race the poll loop that reads that map.
+		rows, err := db.New(sqlDB).ListPendingSettlements(ctx)
+		if err != nil {
+			return fmt.Errorf("chainwatcher: list pending settlements: %w", err)
+		}
+		tracked := 0
+		for _, row := range rows {
+			// Log-and-continue on a per-row failure: one malformed hash must not
+			// keep the watcher from tracking every other pending settlement.
+			if err := w.Track(chain.TxHash(row.TxHash)); err != nil {
+				log.Error("chainwatcher: track pending settlement", "tx_hash", row.TxHash, "error", err)
+				continue
+			}
+			tracked++
+		}
+		log.Info("chainwatcher tracking", "settlements", tracked)
+
+		return w.Run(ctx, sink)
 	})
 }
