@@ -12,7 +12,7 @@ LDFLAGS    := -s -w \
 	-X '$(VPKG).Commit=$(COMMIT)' \
 	-X '$(VPKG).BuildDate=$(BUILD_DATE)'
 
-.PHONY: all build test cover vet lint tidy sqlc proto up down clean $(BINARIES)
+.PHONY: all build test test-chaos cover vet lint tidy sqlc proto up down clean $(BINARIES)
 
 all: build
 
@@ -25,6 +25,11 @@ $(BINARIES):
 ## test: run the full test suite with the race detector
 test:
 	go test -race ./...
+
+## test-chaos: run the fault-injection suite against the dev-stack Postgres
+## (PAYMENT_RAIL_TEST_DSN must point at it; the suite skips when unset)
+test-chaos:
+	go test -race -tags chaos ./internal/chaos/...
 
 ## cover: run tests with coverage and print a per-func summary
 cover:
