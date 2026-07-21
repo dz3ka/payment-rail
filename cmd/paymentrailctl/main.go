@@ -45,6 +45,13 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "loadtest" {
+		if err := runLoadtest(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	// reconcile owns its own tri-state int exit code (0 clean / 1 discrepancy /
 	// 2 operational), unlike the err→exit(1) commands above, so main hands the
 	// exit straight through instead of collapsing it to a boolean success.
@@ -80,5 +87,6 @@ Commands:
   replay-webhook  re-drive dead-lettered webhook deliveries for a subscription (--subscription-id <uuid>)
   audit verify    verify the append-only hash-chained audit log ([--expect-head-hash <hex>])
   reconcile       reconcile on-chain treasury balances vs. the ledger and check proof-of-reserves
+  loadtest        seed accounts and drive the payments API under load ([--url], [--concurrency], [--duration|--requests], [--migrate])
 `, version.String())
 }
