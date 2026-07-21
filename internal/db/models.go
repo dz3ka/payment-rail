@@ -82,6 +82,13 @@ type Settlement struct {
 	SettledBlockNumber sql.NullInt64
 }
 
+type VelocityEvent struct {
+	ID         uuid.UUID
+	KeyID      string
+	Amount     int64
+	OccurredAt time.Time
+}
+
 type WebhookDelivery struct {
 	ID             uuid.UUID
 	EventID        uuid.UUID

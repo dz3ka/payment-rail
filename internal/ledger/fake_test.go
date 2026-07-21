@@ -277,3 +277,17 @@ func (q *fakeQuerier) MarkDeliveryDeadLettered(context.Context, db.MarkDeliveryD
 func (q *fakeQuerier) ReplayDeadLettered(context.Context, uuid.UUID) (int64, error) {
 	panic("fakeQuerier.ReplayDeadLettered: not used by the ledger domain")
 }
+
+// Velocity methods belong to the policy engine (M5 / slice 2); the ledger domain
+// never calls them, so they panic like the webhook/outbox stubs above.
+func (q *fakeQuerier) AcquireVelocityLock(context.Context, int64) error {
+	panic("fakeQuerier.AcquireVelocityLock: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) SumVelocityWindow(context.Context, db.SumVelocityWindowParams) (db.SumVelocityWindowRow, error) {
+	panic("fakeQuerier.SumVelocityWindow: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) InsertVelocityEvent(context.Context, db.InsertVelocityEventParams) error {
+	panic("fakeQuerier.InsertVelocityEvent: not used by the ledger domain")
+}

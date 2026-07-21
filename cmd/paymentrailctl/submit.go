@@ -164,6 +164,51 @@ func runSubmit(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// Enforce per-key velocity limits BEFORE any signer/chain dial: like the
+	// denylist screen above, a rejected payment must never cause a dial or a
+	// broadcast. The caps come from config (config stays big.Int-free, so the
+	// composition root parses MaxAmount here); a malformed cap fails closed.
+	caps := policy.VelocityCaps{
+		Window:   cfg.PolicyVelocityWindow,
+		MaxCount: cfg.PolicyVelocityMaxCount,
+	}
+	if cfg.PolicyVelocityMaxAmount != "" {
+		maxAmount, ok := new(big.Int).SetString(cfg.PolicyVelocityMaxAmount, 10)
+		if !ok {
+			return fmt.Errorf("submit: PAYMENT_RAIL_POLICY_VELOCITY_MAX_AMOUNT %q is not a valid decimal integer", cfg.PolicyVelocityMaxAmount) // fail closed
+		}
+		caps.MaxAmount = maxAmount
+	}
+	// Only open Postgres when velocity enforcement is actually configured: with the
+	// caps disabled the legacy contract holds — no DB dial happens at all.
+	if caps.Enabled() {
+		sqlDB, err := sql.Open("postgres", cfg.DatabaseURL)
+		if err != nil {
+			return fmt.Errorf("submit: velocity check: open database: %w", err) // fail closed
+		}
+		defer func() { _ = sqlDB.Close() }()
+
+		// Charge records the spend event as part of the same locked transaction that
+		// admits it (record-on-attempt), so a later broadcast failure still consumes
+		// window budget. That over-counts only in the safe direction — recording after
+		// a successful broadcast would reopen the concurrent-double-spend window the
+		// per-key advisory lock exists to close. See ADR-0019.
+		limiter := policy.NewVelocityLimiter(newVelocityStore(sqlDB), caps)
+		if err := limiter.Charge(ctx, keyID, amount); err != nil {
+			if errors.Is(err, policy.ErrVelocityExceeded) {
+				// Audit trail for a rejected payment. key_id is safe to log (it is a
+				// signing-key handle, not a recipient or amount) — this extends the
+				// slice-1 deny-only log exception; the amount and --to are never logged.
+				logger.Warn("payment rejected by velocity policy", "key_id", keyID, "error", err)
+			} else {
+				// The velocity backend itself failed (DB unreachable, lock error, ...).
+				// Fail closed and log at ERROR so an operator sees the control is degraded.
+				logger.Error("velocity check failed; failing closed", "key_id", keyID, "error", err)
+			}
+			return fmt.Errorf("submit: velocity check: %w", err)
+		}
+	}
+
 	// Dial the isolated signer over loopback (no mTLS in slice 1); grpc.NewClient
 	// is lazy, so a bad address surfaces on the first RPC, not here.
 	conn, err := grpc.NewClient(cfg.SignerGRPCAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))

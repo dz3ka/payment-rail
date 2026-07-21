@@ -12,6 +12,10 @@ import (
 )
 
 type Querier interface {
+	// Serialize check-then-insert for one signing key: the xact-scoped advisory lock
+	// releases at commit/rollback, so concurrent submissions on the same key can't
+	// both read a stale window sum and race past the ceiling.
+	AcquireVelocityLock(ctx context.Context, lockKey int64) error
 	// Guarded on status = 'completed' so a concurrent or repeated cancel matches no
 	// row and the caller sees sql.ErrNoRows instead of double-reversing.
 	CancelPayment(ctx context.Context, arg CancelPaymentParams) (Payment, error)
@@ -62,6 +66,7 @@ type Querier interface {
 	// sql.ErrNoRows — the "already linked" signal — and resolves it via
 	// GetSettlementByTxHash instead of double-inserting.
 	InsertSettlement(ctx context.Context, arg InsertSettlementParams) (Settlement, error)
+	InsertVelocityEvent(ctx context.Context, arg InsertVelocityEventParams) error
 	// Keyset continuation: everything strictly older than the cursor. The row-value
 	// comparison (created_at, id) < ($1, $2) is a single index range scan over
 	// idx_payments_keyset — stable under inserts and free of OFFSET's skew.
@@ -97,6 +102,8 @@ type Querier interface {
 	// Re-drive every dead-lettered delivery for one subscription (operator action
 	// after fixing a broken endpoint): reset to pending, clear error, deliver now.
 	ReplayDeadLettered(ctx context.Context, subscriptionID uuid.UUID) (int64, error)
+	// Count and total amount of a key's events since the window start.
+	SumVelocityWindow(ctx context.Context, arg SumVelocityWindowParams) (SumVelocityWindowRow, error)
 }
 
 var _ Querier = (*Queries)(nil)

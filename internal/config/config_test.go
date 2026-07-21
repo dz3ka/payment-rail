@@ -24,6 +24,9 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("PAYMENT_RAIL_WATCHER_CONFIRMATIONS", "")
 	t.Setenv("PAYMENT_RAIL_WATCHER_POLL_INTERVAL_SECONDS", "")
 	t.Setenv("PAYMENT_RAIL_POLICY_DENYLIST", "")
+	t.Setenv("PAYMENT_RAIL_POLICY_VELOCITY_WINDOW_SECONDS", "")
+	t.Setenv("PAYMENT_RAIL_POLICY_VELOCITY_MAX_COUNT", "")
+	t.Setenv("PAYMENT_RAIL_POLICY_VELOCITY_MAX_AMOUNT", "")
 
 	cfg, err := Load()
 	if err != nil {
@@ -78,6 +81,15 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.PolicyDenylist != "" {
 		t.Errorf("PolicyDenylist = %q, want %q", cfg.PolicyDenylist, "")
 	}
+	if cfg.PolicyVelocityWindow != 0 {
+		t.Errorf("PolicyVelocityWindow = %v, want %v", cfg.PolicyVelocityWindow, time.Duration(0))
+	}
+	if cfg.PolicyVelocityMaxCount != 0 {
+		t.Errorf("PolicyVelocityMaxCount = %d, want %d", cfg.PolicyVelocityMaxCount, 0)
+	}
+	if cfg.PolicyVelocityMaxAmount != "" {
+		t.Errorf("PolicyVelocityMaxAmount = %q, want %q", cfg.PolicyVelocityMaxAmount, "")
+	}
 }
 
 func TestLoadOverrides(t *testing.T) {
@@ -96,6 +108,9 @@ func TestLoadOverrides(t *testing.T) {
 	t.Setenv("PAYMENT_RAIL_WATCHER_CONFIRMATIONS", "6")
 	t.Setenv("PAYMENT_RAIL_WATCHER_POLL_INTERVAL_SECONDS", "3")
 	t.Setenv("PAYMENT_RAIL_POLICY_DENYLIST", "/etc/payment-rail/denylist.json")
+	t.Setenv("PAYMENT_RAIL_POLICY_VELOCITY_WINDOW_SECONDS", "3600")
+	t.Setenv("PAYMENT_RAIL_POLICY_VELOCITY_MAX_COUNT", "10")
+	t.Setenv("PAYMENT_RAIL_POLICY_VELOCITY_MAX_AMOUNT", "1000000")
 
 	cfg, err := Load()
 	if err != nil {
@@ -147,6 +162,15 @@ func TestLoadOverrides(t *testing.T) {
 	if cfg.PolicyDenylist != "/etc/payment-rail/denylist.json" {
 		t.Errorf("PolicyDenylist = %q, want %q", cfg.PolicyDenylist, "/etc/payment-rail/denylist.json")
 	}
+	if cfg.PolicyVelocityWindow != 3600*time.Second {
+		t.Errorf("PolicyVelocityWindow = %v, want %v", cfg.PolicyVelocityWindow, 3600*time.Second)
+	}
+	if cfg.PolicyVelocityMaxCount != 10 {
+		t.Errorf("PolicyVelocityMaxCount = %d, want %d", cfg.PolicyVelocityMaxCount, 10)
+	}
+	if cfg.PolicyVelocityMaxAmount != "1000000" {
+		t.Errorf("PolicyVelocityMaxAmount = %q, want %q", cfg.PolicyVelocityMaxAmount, "1000000")
+	}
 }
 
 func TestLoadInvalidWatcherConfirmations(t *testing.T) {
@@ -162,6 +186,22 @@ func TestLoadInvalidWatcherPollInterval(t *testing.T) {
 
 	if _, err := Load(); err == nil {
 		t.Fatal("Load() = nil error, want parse error for invalid watcher poll interval")
+	}
+}
+
+func TestLoadInvalidPolicyVelocityWindow(t *testing.T) {
+	t.Setenv("PAYMENT_RAIL_POLICY_VELOCITY_WINDOW_SECONDS", "whenever")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() = nil error, want parse error for invalid policy velocity window")
+	}
+}
+
+func TestLoadInvalidPolicyVelocityMaxCount(t *testing.T) {
+	t.Setenv("PAYMENT_RAIL_POLICY_VELOCITY_MAX_COUNT", "many")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() = nil error, want parse error for invalid policy velocity max count")
 	}
 }
 

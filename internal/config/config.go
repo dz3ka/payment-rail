@@ -50,6 +50,16 @@ type Config struct {
 	// payment path screens against before broadcast. "" disables screening. The
 	// path is plain here — policy.Load validates it fail-closed at submit time.
 	PolicyDenylist string // path to JSON denylist manifest; "" disables screening
+	// Velocity limits (PRD F8b): sliding-window rate caps the payment path enforces
+	// per signing key-id before broadcast. PolicyVelocityWindow is the lookback window
+	// (0 disables velocity checks entirely); PolicyVelocityMaxCount caps the number
+	// of payments in the window (0 = unlimited); PolicyVelocityMaxAmount caps the
+	// summed amount in the window. MaxAmount is a decimal string the composition
+	// root parses to *big.Int (same as ChainMaxFeePerGasCapWei), keeping config
+	// big.Int-free; "" disables the amount cap.
+	PolicyVelocityWindow    time.Duration // velocity lookback window; 0 disables velocity checks
+	PolicyVelocityMaxCount  uint64        // max payments per window; 0 = unlimited
+	PolicyVelocityMaxAmount string        // max summed amount per window (decimal); "" = unlimited
 }
 
 // Load reads configuration from environment variables, applying documented
@@ -79,7 +89,10 @@ func Load() (Config, error) {
 		OutboxPollInterval:  5 * time.Second,
 		WebhookPollInterval: 5 * time.Second,
 
-		PolicyDenylist: getEnv("PAYMENT_RAIL_POLICY_DENYLIST", ""),
+		PolicyDenylist:          getEnv("PAYMENT_RAIL_POLICY_DENYLIST", ""),
+		PolicyVelocityWindow:    0,
+		PolicyVelocityMaxCount:  0,
+		PolicyVelocityMaxAmount: getEnv("PAYMENT_RAIL_POLICY_VELOCITY_MAX_AMOUNT", ""),
 	}
 
 	if v := os.Getenv("PAYMENT_RAIL_SHUTDOWN_TIMEOUT_SECONDS"); v != "" {
@@ -136,6 +149,26 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("config: parse PAYMENT_RAIL_WEBHOOK_POLL_INTERVAL_SECONDS %q: %w", v, err)
 		}
 		cfg.WebhookPollInterval = time.Duration(secs) * time.Second
+	}
+
+	if v := os.Getenv("PAYMENT_RAIL_POLICY_VELOCITY_WINDOW_SECONDS"); v != "" {
+		secs, err := strconv.Atoi(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("config: parse PAYMENT_RAIL_POLICY_VELOCITY_WINDOW_SECONDS %q: %w", v, err)
+		}
+		// Fail closed: a negative window is a misconfiguration, not a disable.
+		if secs < 0 {
+			return Config{}, fmt.Errorf("config: parse PAYMENT_RAIL_POLICY_VELOCITY_WINDOW_SECONDS %q: must not be negative", v)
+		}
+		cfg.PolicyVelocityWindow = time.Duration(secs) * time.Second
+	}
+
+	if v := os.Getenv("PAYMENT_RAIL_POLICY_VELOCITY_MAX_COUNT"); v != "" {
+		n, err := strconv.ParseUint(v, 10, 64)
+		if err != nil {
+			return Config{}, fmt.Errorf("config: parse PAYMENT_RAIL_POLICY_VELOCITY_MAX_COUNT %q: %w", v, err)
+		}
+		cfg.PolicyVelocityMaxCount = n
 	}
 
 	return cfg, nil
