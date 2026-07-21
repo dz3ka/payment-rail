@@ -57,6 +57,9 @@ type fakeRPC struct {
 	estimate    uint64
 	estimateErr error
 
+	callOut []byte
+	callErr error
+
 	sendErr error
 	sent    []*types.Transaction
 }
@@ -92,6 +95,10 @@ func (f *fakeRPC) SuggestGasTipCap(_ context.Context) (*big.Int, error) {
 
 func (f *fakeRPC) EstimateGas(_ context.Context, _ ethereum.CallMsg) (uint64, error) {
 	return f.estimate, f.estimateErr
+}
+
+func (f *fakeRPC) CallContract(_ context.Context, _ ethereum.CallMsg, _ *big.Int) ([]byte, error) {
+	return f.callOut, f.callErr
 }
 
 func (f *fakeRPC) SendTransaction(_ context.Context, tx *types.Transaction) error {

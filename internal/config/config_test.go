@@ -29,6 +29,7 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("PAYMENT_RAIL_POLICY_VELOCITY_MAX_AMOUNT", "")
 	t.Setenv("PAYMENT_RAIL_POLICY_APPROVAL_THRESHOLD", "")
 	t.Setenv("PAYMENT_RAIL_POLICY_APPROVERS", "")
+	t.Setenv("PAYMENT_RAIL_RECONCILE_TREASURIES", "")
 
 	cfg, err := Load()
 	if err != nil {
@@ -98,6 +99,9 @@ func TestLoadDefaults(t *testing.T) {
 	if len(cfg.PolicyApprovers) != 0 {
 		t.Errorf("PolicyApprovers = %v, want empty", cfg.PolicyApprovers)
 	}
+	if cfg.ReconcileTreasuries != "" {
+		t.Errorf("ReconcileTreasuries = %q, want %q", cfg.ReconcileTreasuries, "")
+	}
 }
 
 func TestLoadOverrides(t *testing.T) {
@@ -121,6 +125,7 @@ func TestLoadOverrides(t *testing.T) {
 	t.Setenv("PAYMENT_RAIL_POLICY_VELOCITY_MAX_AMOUNT", "1000000")
 	t.Setenv("PAYMENT_RAIL_POLICY_APPROVAL_THRESHOLD", "5000000")
 	t.Setenv("PAYMENT_RAIL_POLICY_APPROVERS", "alice, bob,")
+	t.Setenv("PAYMENT_RAIL_RECONCILE_TREASURIES", "/etc/payment-rail/treasuries.json")
 
 	cfg, err := Load()
 	if err != nil {
@@ -183,6 +188,9 @@ func TestLoadOverrides(t *testing.T) {
 	}
 	if cfg.PolicyApprovalThreshold != "5000000" {
 		t.Errorf("PolicyApprovalThreshold = %q, want %q", cfg.PolicyApprovalThreshold, "5000000")
+	}
+	if cfg.ReconcileTreasuries != "/etc/payment-rail/treasuries.json" {
+		t.Errorf("ReconcileTreasuries = %q, want %q", cfg.ReconcileTreasuries, "/etc/payment-rail/treasuries.json")
 	}
 	wantApprovers := []string{"alice", "bob"}
 	if len(cfg.PolicyApprovers) != len(wantApprovers) {

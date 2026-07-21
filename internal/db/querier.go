@@ -98,6 +98,17 @@ type Querier interface {
 	// is terminal and deliberately excluded. Ordered by created_at so the watcher
 	// processes them oldest-first.
 	ListPendingSettlements(ctx context.Context) ([]Settlement, error)
+	// Keyset continuation: everything strictly after the cursor. The row-value
+	// comparison (created_at, id) > (@after_created_at, @after_id) is a single
+	// index range scan, stable under concurrent inserts and free of OFFSET's skew.
+	ListSettlementsForReconcileAfter(ctx context.Context, arg ListSettlementsForReconcileAfterParams) ([]ListSettlementsForReconcileAfterRow, error)
+	// First keyset page of settlements that count toward the ledger's on-chain
+	// expectation: only 'settled' (confirmed, not yet final) and 'finalized' rows.
+	// Amount/asset live on the payment, so we join. Ordered ASC by (created_at, id)
+	// — the reconcile job pages forward, oldest-first, so a mid-scan insert lands
+	// past the cursor and is simply picked up on a later run. The cursor for the
+	// next page is the last row's (created_at, id).
+	ListSettlementsForReconcileFirstPage(ctx context.Context, limit int32) ([]ListSettlementsForReconcileFirstPageRow, error)
 	// Guarded on status = 'pending' so a concurrent or repeated claim matches no row;
 	// the rows-affected count lets the caller detect an already-claimed approval.
 	MarkApprovalApproved(ctx context.Context, arg MarkApprovalApprovedParams) (int64, error)
@@ -134,6 +145,10 @@ type Querier interface {
 	// The full chain oldest-first, so a verifier can rehash each row against its
 	// predecessor and confirm no historical row was altered or removed.
 	ScanAuditChain(ctx context.Context) ([]AuditLog, error)
+	// Per-asset Σ(credit − debit) over every account EXCEPT the onchain_settlement
+	// house account. This is the (signed) sum of user-facing balances; the Go caller
+	// negates it to get liabilities = −Σ(non-house balances) for proof-of-reserves.
+	SumNonHouseLiabilities(ctx context.Context, asset string) (int64, error)
 	// Count and total amount of a key's events since the window start.
 	SumVelocityWindow(ctx context.Context, arg SumVelocityWindowParams) (SumVelocityWindowRow, error)
 }

@@ -45,6 +45,12 @@ func main() {
 		}
 		return
 	}
+	// reconcile owns its own tri-state int exit code (0 clean / 1 discrepancy /
+	// 2 operational), unlike the err→exit(1) commands above, so main hands the
+	// exit straight through instead of collapsing it to a boolean success.
+	if len(os.Args) > 1 && os.Args[1] == "reconcile" {
+		os.Exit(runReconcile(os.Args[2:]))
+	}
 
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Usage = usage
@@ -73,5 +79,6 @@ Commands:
   approve         approve and broadcast a parked four-eyes payment (approve <approval-id> --approver=<id>)
   replay-webhook  re-drive dead-lettered webhook deliveries for a subscription (--subscription-id <uuid>)
   audit verify    verify the append-only hash-chained audit log ([--expect-head-hash <hex>])
+  reconcile       reconcile on-chain treasury balances vs. the ledger and check proof-of-reserves
 `, version.String())
 }

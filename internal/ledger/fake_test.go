@@ -331,3 +331,17 @@ func (q *fakeQuerier) InsertAuditEntry(context.Context, db.InsertAuditEntryParam
 func (q *fakeQuerier) ScanAuditChain(context.Context) ([]db.AuditLog, error) {
 	panic("fakeQuerier.ScanAuditChain: not used by the ledger domain")
 }
+
+// Reconciliation queries belong to the reconcile service (F10); the ledger
+// domain never calls them, so they panic like the stubs above.
+func (q *fakeQuerier) ListSettlementsForReconcileFirstPage(context.Context, int32) ([]db.ListSettlementsForReconcileFirstPageRow, error) {
+	panic("fakeQuerier.ListSettlementsForReconcileFirstPage: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) ListSettlementsForReconcileAfter(context.Context, db.ListSettlementsForReconcileAfterParams) ([]db.ListSettlementsForReconcileAfterRow, error) {
+	panic("fakeQuerier.ListSettlementsForReconcileAfter: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) SumNonHouseLiabilities(context.Context, string) (int64, error) {
+	panic("fakeQuerier.SumNonHouseLiabilities: not used by the ledger domain")
+}

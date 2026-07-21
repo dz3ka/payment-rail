@@ -6,6 +6,8 @@ import (
 	"math/big"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/common"
+
 	"github.com/dz3ka/payment-rail/internal/chain"
 )
 
@@ -76,5 +78,44 @@ func TestPackERC20TransferRejectsInvalidAmount(t *testing.T) {
 func TestSelectorMatchesSignerPolicy(t *testing.T) {
 	if erc20TransferSelector != [4]byte{0xa9, 0x05, 0x9c, 0xbb} {
 		t.Fatalf("selector = %x, want a9059cbb", erc20TransferSelector)
+	}
+}
+
+func TestPackERC20BalanceOfLayout(t *testing.T) {
+	tests := []struct {
+		name   string
+		holder common.Address
+	}{
+		{"non-zero holder", testTo},
+		{"another holder", testFrom},
+		{"zero address", common.Address{}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			data := packERC20BalanceOf(tc.holder)
+
+			if len(data) != 36 {
+				t.Fatalf("calldata length = %d, want 36", len(data))
+			}
+			// Selector is keccak256("balanceOf(address)")[:4].
+			if got := data[:4]; !bytes.Equal(got, []byte{0x70, 0xa0, 0x82, 0x31}) {
+				t.Errorf("selector = %x, want 70a08231", got)
+			}
+			// Holder right-aligned in the word at data[4:36]: high 12 bytes zero, low
+			// 20 bytes the address.
+			if hi := data[4:16]; !bytes.Equal(hi, make([]byte, 12)) {
+				t.Errorf("holder word high bytes = %x, want all zero", hi)
+			}
+			if lo := data[16:36]; !bytes.Equal(lo, tc.holder.Bytes()) {
+				t.Errorf("holder bytes = %x, want %x", lo, tc.holder.Bytes())
+			}
+		})
+	}
+}
+
+// Guard against a silent balanceOf selector drift.
+func TestBalanceOfSelector(t *testing.T) {
+	if erc20BalanceOfSelector != [4]byte{0x70, 0xa0, 0x82, 0x31} {
+		t.Fatalf("selector = %x, want 70a08231", erc20BalanceOfSelector)
 	}
 }

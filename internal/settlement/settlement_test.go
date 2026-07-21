@@ -438,6 +438,20 @@ func (q *fakeQuerier) ScanAuditChain(context.Context) ([]db.AuditLog, error) {
 	return q.audit, nil
 }
 
+// Reconciliation queries belong to the reconcile service (F10); the settlement
+// domain never calls them.
+func (q *fakeQuerier) ListSettlementsForReconcileFirstPage(context.Context, int32) ([]db.ListSettlementsForReconcileFirstPageRow, error) {
+	panic("fakeQuerier.ListSettlementsForReconcileFirstPage: not used by the settlement domain")
+}
+
+func (q *fakeQuerier) ListSettlementsForReconcileAfter(context.Context, db.ListSettlementsForReconcileAfterParams) ([]db.ListSettlementsForReconcileAfterRow, error) {
+	panic("fakeQuerier.ListSettlementsForReconcileAfter: not used by the settlement domain")
+}
+
+func (q *fakeQuerier) SumNonHouseLiabilities(context.Context, string) (int64, error) {
+	panic("fakeQuerier.SumNonHouseLiabilities: not used by the settlement domain")
+}
+
 // auditActions returns the action of every recorded audit row, in order.
 func (q *fakeQuerier) auditActions() []string {
 	actions := make([]string, len(q.audit))

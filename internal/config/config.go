@@ -68,6 +68,11 @@ type Config struct {
 	// propose/approve four-eyes payments; empty = none configured.
 	PolicyApprovalThreshold string   // min amount requiring four-eyes (decimal); ""/"0" disables
 	PolicyApprovers         []string // operator identities allowed to propose/approve; empty = none
+	// Reconciliation (M6): path to the JSON treasury manifest the reconcile command
+	// reads on-chain balances for. "" ⇒ the reconcile command derives a single-entry
+	// registry from ChainFromAddress/ChainUSDCAddress instead of reading a file. The
+	// path is plain here — reconcile.LoadRegistry validates it fail-closed.
+	ReconcileTreasuries string // path to JSON treasury manifest; "" ⇒ derive single entry from Chain* config
 }
 
 // Load reads configuration from environment variables, applying documented
@@ -103,6 +108,8 @@ func Load() (Config, error) {
 		PolicyVelocityMaxAmount: getEnv("PAYMENT_RAIL_POLICY_VELOCITY_MAX_AMOUNT", ""),
 		PolicyApprovalThreshold: getEnv("PAYMENT_RAIL_POLICY_APPROVAL_THRESHOLD", ""),
 		PolicyApprovers:         splitBrokers(getEnv("PAYMENT_RAIL_POLICY_APPROVERS", "")),
+
+		ReconcileTreasuries: getEnv("PAYMENT_RAIL_RECONCILE_TREASURIES", ""),
 	}
 
 	if v := os.Getenv("PAYMENT_RAIL_SHUTDOWN_TIMEOUT_SECONDS"); v != "" {
