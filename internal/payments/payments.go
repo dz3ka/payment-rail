@@ -20,6 +20,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/dz3ka/payment-rail/internal/audit"
 	"github.com/dz3ka/payment-rail/internal/db"
 	"github.com/dz3ka/payment-rail/internal/ledger"
 	"github.com/dz3ka/payment-rail/internal/outbox"
@@ -119,9 +120,27 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (db.Payment, error
 		// A fresh insert is always a real transition (pid is new each call), so
 		// emitting unconditionally here still emits exactly once per created
 		// payment, in the same tx as the row it describes.
-		return outbox.Emit(ctx, q, outbox.Event{
+		if err := outbox.Emit(ctx, q, outbox.Event{
 			Type:        "payment.created",
 			AggregateID: pid.String(),
+			Data: paymentEvent{
+				ID:     payment.ID,
+				Asset:  payment.Asset,
+				Amount: payment.Amount,
+				Source: payment.SourceAccountID,
+				Dest:   payment.DestAccountID,
+				Status: payment.Status,
+			},
+		}); err != nil {
+			return err
+		}
+		// F9: record the same fact in the hash-chained audit log, as the last write
+		// in this tx — a failed append rolls the payment back (fail-closed).
+		return audit.Append(ctx, q, audit.Entry{
+			Actor:         "system:payments",
+			Action:        "payment.created",
+			AggregateType: "payment",
+			AggregateID:   pid.String(),
 			Data: paymentEvent{
 				ID:     payment.ID,
 				Asset:  payment.Asset,
@@ -241,9 +260,27 @@ func (s *Service) Cancel(ctx context.Context, id uuid.UUID) (db.Payment, error) 
 		// Reached only when CancelPayment flipped a completed row to canceled — a
 		// concurrent/repeated cancel returns ErrNoRows above and never gets here, so
 		// this emits exactly once per real cancellation, in the same tx.
-		return outbox.Emit(ctx, q, outbox.Event{
+		if err := outbox.Emit(ctx, q, outbox.Event{
 			Type:        "payment.canceled",
 			AggregateID: id.String(),
+			Data: paymentEvent{
+				ID:     canceled.ID,
+				Asset:  canceled.Asset,
+				Amount: canceled.Amount,
+				Source: canceled.SourceAccountID,
+				Dest:   canceled.DestAccountID,
+				Status: canceled.Status,
+			},
+		}); err != nil {
+			return err
+		}
+		// F9: record the cancellation in the audit log as the last write in this tx
+		// (fail-closed — a failed append rolls the status flip back).
+		return audit.Append(ctx, q, audit.Entry{
+			Actor:         "system:payments",
+			Action:        "payment.canceled",
+			AggregateType: "payment",
+			AggregateID:   id.String(),
 			Data: paymentEvent{
 				ID:     canceled.ID,
 				Asset:  canceled.Asset,

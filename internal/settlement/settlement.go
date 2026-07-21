@@ -31,6 +31,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/dz3ka/payment-rail/internal/audit"
 	"github.com/dz3ka/payment-rail/internal/chain/evm"
 	"github.com/dz3ka/payment-rail/internal/db"
 	"github.com/dz3ka/payment-rail/internal/ledger"
@@ -239,6 +240,18 @@ func (s *Sink) settle(ctx context.Context, q db.Querier, sett db.Settlement, pay
 		return err
 	}
 
+	// F9: record the confirmation in the hash-chained audit log as the last write
+	// in this tx — a failed append rolls the settle back (fail-closed).
+	if err := audit.Append(ctx, q, audit.Entry{
+		Actor:         "system:chainwatcher",
+		Action:        "settlement.confirmed",
+		AggregateType: "settlement",
+		AggregateID:   string(st.TxHash),
+		Data:          settlementEvent{PaymentID: sett.PaymentID, TxHash: string(st.TxHash), Asset: pay.Asset, Amount: pay.Amount},
+	}); err != nil {
+		return err
+	}
+
 	s.logResult(ctx, "settle", pay, st, nil)
 	return nil
 }
@@ -294,6 +307,18 @@ func (s *Sink) reverse(ctx context.Context, q db.Querier, sett db.Settlement, pa
 		return err
 	}
 
+	// F9: record the reversal in the audit log as the last write in this tx
+	// (fail-closed — a failed append rolls the reorg flip back).
+	if err := audit.Append(ctx, q, audit.Entry{
+		Actor:         "system:chainwatcher",
+		Action:        "settlement.reorged",
+		AggregateType: "settlement",
+		AggregateID:   string(st.TxHash),
+		Data:          settlementEvent{PaymentID: sett.PaymentID, TxHash: string(st.TxHash), Asset: pay.Asset, Amount: pay.Amount},
+	}); err != nil {
+		return err
+	}
+
 	s.logResult(ctx, "reverse", pay, st, nil)
 	return nil
 }
@@ -328,10 +353,21 @@ func (s *Sink) finalize(ctx context.Context, st evm.Status) error {
 		// returns ErrNoRows above and never reaches here, so this emits exactly once
 		// per real finalization, in the same tx. finalize resolves no payment, so the
 		// body carries tx_hash + payment_id (from the marked row) without asset/amount.
-		return outbox.Emit(ctx, q, outbox.Event{
+		if err := outbox.Emit(ctx, q, outbox.Event{
 			Type:        "settlement.finalized",
 			AggregateID: txHash,
 			Data:        settlementEvent{PaymentID: sett.PaymentID, TxHash: txHash},
+		}); err != nil {
+			return err
+		}
+		// F9: record the finalization in the audit log as the last write in this tx
+		// (fail-closed — a failed append rolls the finalized flip back).
+		return audit.Append(ctx, q, audit.Entry{
+			Actor:         "system:chainwatcher",
+			Action:        "settlement.finalized",
+			AggregateType: "settlement",
+			AggregateID:   txHash,
+			Data:          settlementEvent{PaymentID: sett.PaymentID, TxHash: txHash},
 		})
 	})
 }

@@ -41,7 +41,8 @@ type fakeQuerier struct {
 	payments    map[uuid.UUID]db.Payment
 	settlements map[string]db.Settlement // keyed by tx_hash
 	outbox      []db.InsertOutboxEventParams
-	outboxErr   error // when set, InsertOutboxEvent fails, aborting the tx
+	outboxErr   error         // when set, InsertOutboxEvent fails, aborting the tx
+	audit       []db.AuditLog // minimal in-memory append-only audit chain (F9)
 	nextLine    int64
 }
 
@@ -386,6 +387,79 @@ func (q *fakeQuerier) MarkDeliveryDeadLettered(context.Context, db.MarkDeliveryD
 func (q *fakeQuerier) ReplayDeadLettered(context.Context, uuid.UUID) (int64, error) {
 	panic("fakeQuerier.ReplayDeadLettered: not used by the settlement domain")
 }
+func (q *fakeQuerier) AcquireVelocityLock(context.Context, int64) error {
+	panic("fakeQuerier.AcquireVelocityLock: not used by the settlement domain")
+}
+func (q *fakeQuerier) SumVelocityWindow(context.Context, db.SumVelocityWindowParams) (db.SumVelocityWindowRow, error) {
+	panic("fakeQuerier.SumVelocityWindow: not used by the settlement domain")
+}
+func (q *fakeQuerier) InsertVelocityEvent(context.Context, db.InsertVelocityEventParams) error {
+	panic("fakeQuerier.InsertVelocityEvent: not used by the settlement domain")
+}
+func (q *fakeQuerier) InsertPaymentApproval(context.Context, db.InsertPaymentApprovalParams) (uuid.UUID, error) {
+	panic("fakeQuerier.InsertPaymentApproval: not used by the settlement domain")
+}
+func (q *fakeQuerier) GetApprovalForUpdate(context.Context, uuid.UUID) (db.PaymentApproval, error) {
+	panic("fakeQuerier.GetApprovalForUpdate: not used by the settlement domain")
+}
+func (q *fakeQuerier) MarkApprovalApproved(context.Context, db.MarkApprovalApprovedParams) (int64, error) {
+	panic("fakeQuerier.MarkApprovalApproved: not used by the settlement domain")
+}
+func (q *fakeQuerier) MarkApprovalBroadcast(context.Context, db.MarkApprovalBroadcastParams) (int64, error) {
+	panic("fakeQuerier.MarkApprovalBroadcast: not used by the settlement domain")
+}
+func (q *fakeQuerier) ReopenApproval(context.Context, uuid.UUID) (int64, error) {
+	panic("fakeQuerier.ReopenApproval: not used by the settlement domain")
+}
+
+// --- audit chain (F9) -------------------------------------------------------
+//
+// A minimal in-memory model of the audit_log table so the Sink can flow through
+// audit.Append without a database, mirroring internal/audit/audit_test.go: the
+// lock is a no-op, GetAuditHead returns the tail or sql.ErrNoRows, InsertAuditEntry
+// appends, ScanAuditChain returns the rows.
+
+func (q *fakeQuerier) AcquireAuditChainLock(context.Context, int64) error { return nil }
+
+func (q *fakeQuerier) GetAuditHead(context.Context) (db.GetAuditHeadRow, error) {
+	if len(q.audit) == 0 {
+		return db.GetAuditHeadRow{}, sql.ErrNoRows
+	}
+	last := q.audit[len(q.audit)-1]
+	return db.GetAuditHeadRow{Seq: last.Seq, EntryHash: last.EntryHash}, nil
+}
+
+func (q *fakeQuerier) InsertAuditEntry(_ context.Context, p db.InsertAuditEntryParams) error {
+	q.audit = append(q.audit, db.AuditLog(p))
+	return nil
+}
+
+func (q *fakeQuerier) ScanAuditChain(context.Context) ([]db.AuditLog, error) {
+	return q.audit, nil
+}
+
+// Reconciliation queries belong to the reconcile service (F10); the settlement
+// domain never calls them.
+func (q *fakeQuerier) ListSettlementsForReconcileFirstPage(context.Context, int32) ([]db.ListSettlementsForReconcileFirstPageRow, error) {
+	panic("fakeQuerier.ListSettlementsForReconcileFirstPage: not used by the settlement domain")
+}
+
+func (q *fakeQuerier) ListSettlementsForReconcileAfter(context.Context, db.ListSettlementsForReconcileAfterParams) ([]db.ListSettlementsForReconcileAfterRow, error) {
+	panic("fakeQuerier.ListSettlementsForReconcileAfter: not used by the settlement domain")
+}
+
+func (q *fakeQuerier) SumNonHouseLiabilities(context.Context, string) (int64, error) {
+	panic("fakeQuerier.SumNonHouseLiabilities: not used by the settlement domain")
+}
+
+// auditActions returns the action of every recorded audit row, in order.
+func (q *fakeQuerier) auditActions() []string {
+	actions := make([]string, len(q.audit))
+	for i, a := range q.audit {
+		actions[i] = a.Action
+	}
+	return actions
+}
 
 // --- fixtures ---------------------------------------------------------------
 
@@ -461,6 +535,13 @@ func TestOnStatus_Settle(t *testing.T) {
 	if got := f.q.outbox[0].AggregateID; got != txHash {
 		t.Errorf("outbox aggregate_id = %q, want tx hash %q", got, txHash)
 	}
+	// F9: the confirmation is recorded in the audit chain, keyed by tx_hash.
+	if got := f.q.auditActions(); len(got) != 1 || got[0] != "settlement.confirmed" {
+		t.Fatalf("audit actions = %v, want [settlement.confirmed]", got)
+	}
+	if got := f.q.audit[0].AggregateID; got != txHash {
+		t.Errorf("audit aggregate_id = %q, want tx hash %q", got, txHash)
+	}
 }
 
 //  2. Re-delivering the same Confirmed(A) is a no-op: no second entry, status
@@ -521,6 +602,10 @@ func TestOnStatus_Reverse(t *testing.T) {
 	// One event per real transition: confirm then reorg, both keyed by tx_hash.
 	if got := f.q.outboxTypes(); len(got) != 2 || got[0] != "settlement.confirmed" || got[1] != "settlement.reorged" {
 		t.Errorf("outbox events = %v, want [settlement.confirmed settlement.reorged]", got)
+	}
+	// F9: each real transition records one audit row, in order.
+	if got := f.q.auditActions(); len(got) != 2 || got[0] != "settlement.confirmed" || got[1] != "settlement.reorged" {
+		t.Errorf("audit actions = %v, want [settlement.confirmed settlement.reorged]", got)
 	}
 }
 
@@ -591,6 +676,13 @@ func TestOnStatus_Finalize(t *testing.T) {
 	// Finalize is a real transition, so it emits — one confirmed, one finalized.
 	if got := f.q.outboxTypes(); len(got) != 2 || got[0] != "settlement.confirmed" || got[1] != "settlement.finalized" {
 		t.Errorf("outbox events = %v, want [settlement.confirmed settlement.finalized]", got)
+	}
+	// F9: finalize records its own audit row after the confirm's.
+	if got := f.q.auditActions(); len(got) != 2 || got[0] != "settlement.confirmed" || got[1] != "settlement.finalized" {
+		t.Errorf("audit actions = %v, want [settlement.confirmed settlement.finalized]", got)
+	}
+	if got := f.q.audit[1].AggregateID; got != txHash {
+		t.Errorf("finalize audit aggregate_id = %q, want tx hash %q", got, txHash)
 	}
 }
 

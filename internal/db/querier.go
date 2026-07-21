@@ -12,6 +12,14 @@ import (
 )
 
 type Querier interface {
+	// Serialize the whole chain: the xact-scoped advisory lock releases at
+	// commit/rollback, so concurrent appenders can't both read the same head and
+	// assign the same seq / prev_hash, which would fork the chain.
+	AcquireAuditChainLock(ctx context.Context, lockKey int64) error
+	// Serialize check-then-insert for one signing key: the xact-scoped advisory lock
+	// releases at commit/rollback, so concurrent submissions on the same key can't
+	// both read a stale window sum and race past the ceiling.
+	AcquireVelocityLock(ctx context.Context, lockKey int64) error
 	// Guarded on status = 'completed' so a concurrent or repeated cancel matches no
 	// row and the caller sees sql.ErrNoRows instead of double-reversing.
 	CancelPayment(ctx context.Context, arg CancelPaymentParams) (Payment, error)
@@ -41,9 +49,19 @@ type Querier interface {
 	// surrounding transaction, ordered by id to impose a deterministic lock order
 	// and avoid deadlocks between concurrent transfers. WP2 calls this on Querier.
 	GetAccountsForUpdate(ctx context.Context, ids []uuid.UUID) ([]Account, error)
+	// Locks the row for the duration of the claim transaction so a concurrent
+	// approver blocks rather than racing past the status guard.
+	GetApprovalForUpdate(ctx context.Context, id uuid.UUID) (PaymentApproval, error)
+	// The current tail of the chain, whose entry_hash becomes the next row's
+	// prev_hash and whose seq + 1 becomes the next seq. Callers treat sql.ErrNoRows
+	// as the empty chain: the first row is seq 1 with prev = 32 zero bytes (genesis).
+	GetAuditHead(ctx context.Context) (GetAuditHeadRow, error)
 	GetIdempotencyKey(ctx context.Context, key string) (IdempotencyKey, error)
 	GetPayment(ctx context.Context, id uuid.UUID) (Payment, error)
 	GetSettlementByTxHash(ctx context.Context, txHash string) (Settlement, error)
+	// Appends one already-hashed row. seq, prev_hash and entry_hash are computed by
+	// the app from the head read under the chain lock in the same transaction.
+	InsertAuditEntry(ctx context.Context, arg InsertAuditEntryParams) error
 	InsertEntryLine(ctx context.Context, arg InsertEntryLineParams) (EntryLine, error)
 	// Claims a key for an in-flight request. ON CONFLICT DO NOTHING means a key that
 	// already exists returns zero rows, so the caller gets sql.ErrNoRows — that is
@@ -57,11 +75,15 @@ type Querier interface {
 	// Records a completed payment. status/created_at default appropriately; a
 	// canceled payment is only ever reached via CancelPayment, never inserted.
 	InsertPayment(ctx context.Context, arg InsertPaymentParams) (Payment, error)
+	// Parks a payment's full intent as a pending approval attributed to its proposer.
+	// Returns the generated id so the submit path can reference the queued row.
+	InsertPaymentApproval(ctx context.Context, arg InsertPaymentApprovalParams) (uuid.UUID, error)
 	// Links an on-chain tx to the payment it settles. ON CONFLICT (tx_hash) DO
 	// NOTHING means a re-submitted tx returns zero rows, so the caller gets
 	// sql.ErrNoRows — the "already linked" signal — and resolves it via
 	// GetSettlementByTxHash instead of double-inserting.
 	InsertSettlement(ctx context.Context, arg InsertSettlementParams) (Settlement, error)
+	InsertVelocityEvent(ctx context.Context, arg InsertVelocityEventParams) error
 	// Keyset continuation: everything strictly older than the cursor. The row-value
 	// comparison (created_at, id) < ($1, $2) is a single index range scan over
 	// idx_payments_keyset — stable under inserts and free of OFFSET's skew.
@@ -76,6 +98,23 @@ type Querier interface {
 	// is terminal and deliberately excluded. Ordered by created_at so the watcher
 	// processes them oldest-first.
 	ListPendingSettlements(ctx context.Context) ([]Settlement, error)
+	// Keyset continuation: everything strictly after the cursor. The row-value
+	// comparison (created_at, id) > (@after_created_at, @after_id) is a single
+	// index range scan, stable under concurrent inserts and free of OFFSET's skew.
+	ListSettlementsForReconcileAfter(ctx context.Context, arg ListSettlementsForReconcileAfterParams) ([]ListSettlementsForReconcileAfterRow, error)
+	// First keyset page of settlements that count toward the ledger's on-chain
+	// expectation: only 'settled' (confirmed, not yet final) and 'finalized' rows.
+	// Amount/asset live on the payment, so we join. Ordered ASC by (created_at, id)
+	// — the reconcile job pages forward, oldest-first, so a mid-scan insert lands
+	// past the cursor and is simply picked up on a later run. The cursor for the
+	// next page is the last row's (created_at, id).
+	ListSettlementsForReconcileFirstPage(ctx context.Context, limit int32) ([]ListSettlementsForReconcileFirstPageRow, error)
+	// Guarded on status = 'pending' so a concurrent or repeated claim matches no row;
+	// the rows-affected count lets the caller detect an already-claimed approval.
+	MarkApprovalApproved(ctx context.Context, arg MarkApprovalApprovedParams) (int64, error)
+	// Guarded on status = 'approved' AND tx_hash IS NULL so a double-broadcast matches
+	// no row; the rows-affected count lets the caller detect an already-broadcast row.
+	MarkApprovalBroadcast(ctx context.Context, arg MarkApprovalBroadcastParams) (int64, error)
 	MarkDeliveryDeadLettered(ctx context.Context, arg MarkDeliveryDeadLetteredParams) error
 	MarkDeliveryRetry(ctx context.Context, arg MarkDeliveryRetryParams) error
 	MarkDeliverySucceeded(ctx context.Context, arg MarkDeliverySucceededParams) error
@@ -94,9 +133,24 @@ type Querier interface {
 	// settle matches no row and the caller sees sql.ErrNoRows instead of
 	// re-pointing settle_entry_id. A reorged tx that re-confirms settles again.
 	MarkSettlementSettled(ctx context.Context, arg MarkSettlementSettledParams) (Settlement, error)
+	// Reverts a claimed-but-never-broadcast approval back to pending so a retry can
+	// re-claim it after a pre-send broadcast failure. Guarded on status = 'approved'
+	// AND tx_hash IS NULL: once a broadcast has landed (tx_hash set) reopen matches no
+	// row, so a sent payment can never be resurrected. The rows-affected count lets the
+	// caller detect a row that was not in the reopenable state.
+	ReopenApproval(ctx context.Context, id uuid.UUID) (int64, error)
 	// Re-drive every dead-lettered delivery for one subscription (operator action
 	// after fixing a broken endpoint): reset to pending, clear error, deliver now.
 	ReplayDeadLettered(ctx context.Context, subscriptionID uuid.UUID) (int64, error)
+	// The full chain oldest-first, so a verifier can rehash each row against its
+	// predecessor and confirm no historical row was altered or removed.
+	ScanAuditChain(ctx context.Context) ([]AuditLog, error)
+	// Per-asset Σ(credit − debit) over every account EXCEPT the onchain_settlement
+	// house account. This is the (signed) sum of user-facing balances; the Go caller
+	// negates it to get liabilities = −Σ(non-house balances) for proof-of-reserves.
+	SumNonHouseLiabilities(ctx context.Context, asset string) (int64, error)
+	// Count and total amount of a key's events since the window start.
+	SumVelocityWindow(ctx context.Context, arg SumVelocityWindowParams) (SumVelocityWindowRow, error)
 }
 
 var _ Querier = (*Queries)(nil)

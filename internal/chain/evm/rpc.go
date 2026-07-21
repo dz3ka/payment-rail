@@ -22,4 +22,8 @@ type ethRPC interface {
 	SuggestGasTipCap(ctx context.Context) (*big.Int, error)
 	EstimateGas(ctx context.Context, msg ethereum.CallMsg) (uint64, error)
 	SendTransaction(ctx context.Context, tx *types.Transaction) error
+	// CallContract executes a read-only message call against the given block
+	// (nil = latest) without a transaction, returning the raw ABI-encoded return
+	// data. It is the eth_call the BalanceReader uses to read balanceOf.
+	CallContract(ctx context.Context, msg ethereum.CallMsg, blockNumber *big.Int) ([]byte, error)
 }

@@ -24,12 +24,39 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "approve" {
+		if err := runApprove(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "replay-webhook" {
 		if err := runReplayWebhook(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
 		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "audit" {
+		if err := runAudit(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "loadtest" {
+		if err := runLoadtest(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+	// reconcile owns its own tri-state int exit code (0 clean / 1 discrepancy /
+	// 2 operational), unlike the err→exit(1) commands above, so main hands the
+	// exit straight through instead of collapsing it to a boolean success.
+	if len(os.Args) > 1 && os.Args[1] == "reconcile" {
+		os.Exit(runReconcile(os.Args[2:]))
 	}
 
 	showVersion := flag.Bool("version", false, "print version and exit")
@@ -55,7 +82,11 @@ Flags:
   --version    print version and exit
 
 Commands:
-  submit          sign and broadcast one payment (--to, --amount, [--asset], [--key-id])
+  submit          sign and broadcast one payment (--to, --amount, [--asset], [--key-id], [--proposer])
+  approve         approve and broadcast a parked four-eyes payment (approve <approval-id> --approver=<id>)
   replay-webhook  re-drive dead-lettered webhook deliveries for a subscription (--subscription-id <uuid>)
+  audit verify    verify the append-only hash-chained audit log ([--expect-head-hash <hex>])
+  reconcile       reconcile on-chain treasury balances vs. the ledger and check proof-of-reserves
+  loadtest        seed accounts and drive the payments API under load ([--url], [--concurrency], [--duration|--requests], [--migrate])
 `, version.String())
 }

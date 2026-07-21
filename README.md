@@ -70,6 +70,16 @@ make test
 make down
 ```
 
+Integration and chaos tests need the dev-stack Postgres and are skipped without it.
+Point `PAYMENT_RAIL_TEST_DSN` at the running stack, then:
+
+```bash
+# Fault-injection / chaos suite (crash, DB failover, broken RPC, reorg) —
+# drives the real payment path and asserts the ledger converges. Local-only.
+export PAYMENT_RAIL_TEST_DSN='postgres://payment_rail:payment_rail@localhost:5432/payment_rail?sslmode=disable'
+make test-chaos
+```
+
 Copy `.env.example` to `.env` to override defaults. No real secrets belong in
 either file — see [`docs/threat-model.md`](docs/threat-model.md).
 
@@ -95,7 +105,7 @@ docs/
 | **M2** ✅ | Signer + EVM chain adapter (testnet submit) |
 | **M3** ✅ | Chain-watcher with confirmations + reorg handling |
 | **M4** ✅ | Outbox → Kafka + webhook dispatcher |
-| M5 | Policy engine + audit log |
+| **M5** ✅ | Policy engine + audit log |
 | M6 | Reconciliation + proof-of-reserves report |
 | M7 | Chaos tests, load tests, published benchmark |
 

@@ -277,3 +277,71 @@ func (q *fakeQuerier) MarkDeliveryDeadLettered(context.Context, db.MarkDeliveryD
 func (q *fakeQuerier) ReplayDeadLettered(context.Context, uuid.UUID) (int64, error) {
 	panic("fakeQuerier.ReplayDeadLettered: not used by the ledger domain")
 }
+
+// Velocity methods belong to the policy engine (M5 / slice 2); the ledger domain
+// never calls them, so they panic like the webhook/outbox stubs above.
+func (q *fakeQuerier) AcquireVelocityLock(context.Context, int64) error {
+	panic("fakeQuerier.AcquireVelocityLock: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) SumVelocityWindow(context.Context, db.SumVelocityWindowParams) (db.SumVelocityWindowRow, error) {
+	panic("fakeQuerier.SumVelocityWindow: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) InsertVelocityEvent(context.Context, db.InsertVelocityEventParams) error {
+	panic("fakeQuerier.InsertVelocityEvent: not used by the ledger domain")
+}
+
+// Four-eyes approval methods belong to the approval queue (M5 / slice 3); the
+// ledger domain never calls them, so they panic like the velocity stubs above.
+func (q *fakeQuerier) InsertPaymentApproval(context.Context, db.InsertPaymentApprovalParams) (uuid.UUID, error) {
+	panic("fakeQuerier.InsertPaymentApproval: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) GetApprovalForUpdate(context.Context, uuid.UUID) (db.PaymentApproval, error) {
+	panic("fakeQuerier.GetApprovalForUpdate: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) MarkApprovalApproved(context.Context, db.MarkApprovalApprovedParams) (int64, error) {
+	panic("fakeQuerier.MarkApprovalApproved: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) MarkApprovalBroadcast(context.Context, db.MarkApprovalBroadcastParams) (int64, error) {
+	panic("fakeQuerier.MarkApprovalBroadcast: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) ReopenApproval(context.Context, uuid.UUID) (int64, error) {
+	panic("fakeQuerier.ReopenApproval: not used by the ledger domain")
+}
+
+// Audit-log methods belong to the audit service (F9); the ledger domain never
+// calls them, so they panic like the approval stubs above.
+func (q *fakeQuerier) AcquireAuditChainLock(context.Context, int64) error {
+	panic("fakeQuerier.AcquireAuditChainLock: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) GetAuditHead(context.Context) (db.GetAuditHeadRow, error) {
+	panic("fakeQuerier.GetAuditHead: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) InsertAuditEntry(context.Context, db.InsertAuditEntryParams) error {
+	panic("fakeQuerier.InsertAuditEntry: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) ScanAuditChain(context.Context) ([]db.AuditLog, error) {
+	panic("fakeQuerier.ScanAuditChain: not used by the ledger domain")
+}
+
+// Reconciliation queries belong to the reconcile service (F10); the ledger
+// domain never calls them, so they panic like the stubs above.
+func (q *fakeQuerier) ListSettlementsForReconcileFirstPage(context.Context, int32) ([]db.ListSettlementsForReconcileFirstPageRow, error) {
+	panic("fakeQuerier.ListSettlementsForReconcileFirstPage: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) ListSettlementsForReconcileAfter(context.Context, db.ListSettlementsForReconcileAfterParams) ([]db.ListSettlementsForReconcileAfterRow, error) {
+	panic("fakeQuerier.ListSettlementsForReconcileAfter: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) SumNonHouseLiabilities(context.Context, string) (int64, error) {
+	panic("fakeQuerier.SumNonHouseLiabilities: not used by the ledger domain")
+}

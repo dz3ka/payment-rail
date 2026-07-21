@@ -21,6 +21,18 @@ type Account struct {
 	CreatedAt time.Time
 }
 
+type AuditLog struct {
+	Seq           int64
+	PrevHash      []byte
+	EntryHash     []byte
+	Actor         string
+	Action        string
+	AggregateType string
+	AggregateID   string
+	OccurredAt    time.Time
+	Payload       []byte
+}
+
 type EntryLine struct {
 	ID        int64
 	EntryID   uuid.UUID
@@ -70,6 +82,20 @@ type Payment struct {
 	CanceledAt      sql.NullTime
 }
 
+type PaymentApproval struct {
+	ID        uuid.UUID
+	ToAddress string
+	Amount    int64
+	Asset     string
+	KeyID     string
+	PaymentID uuid.NullUUID
+	Proposer  string
+	Approver  sql.NullString
+	Status    string
+	TxHash    sql.NullString
+	CreatedAt time.Time
+}
+
 type Settlement struct {
 	ID                 uuid.UUID
 	PaymentID          uuid.UUID
@@ -80,6 +106,13 @@ type Settlement struct {
 	UpdatedAt          time.Time
 	SettledBlockHash   sql.NullString
 	SettledBlockNumber sql.NullInt64
+}
+
+type VelocityEvent struct {
+	ID         uuid.UUID
+	KeyID      string
+	Amount     int64
+	OccurredAt time.Time
 }
 
 type WebhookDelivery struct {

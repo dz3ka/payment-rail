@@ -46,6 +46,33 @@ type Config struct {
 	// Webhook delivery (M4): cadence for the webhookd delivery-worker poll loop.
 	// KafkaBrokers is reused; the consumer group id is an internal/webhook constant.
 	WebhookPollInterval time.Duration // delivery-worker poll cadence
+	// Destination screening (PRD F8): path to the JSON denylist manifest the
+	// payment path screens against before broadcast. "" disables screening. The
+	// path is plain here — policy.Load validates it fail-closed at submit time.
+	PolicyDenylist string // path to JSON denylist manifest; "" disables screening
+	// Velocity limits (PRD F8b): sliding-window rate caps the payment path enforces
+	// per signing key-id before broadcast. PolicyVelocityWindow is the lookback window
+	// (0 disables velocity checks entirely); PolicyVelocityMaxCount caps the number
+	// of payments in the window (0 = unlimited); PolicyVelocityMaxAmount caps the
+	// summed amount in the window. MaxAmount is a decimal string the composition
+	// root parses to *big.Int (same as ChainMaxFeePerGasCapWei), keeping config
+	// big.Int-free; "" disables the amount cap.
+	PolicyVelocityWindow    time.Duration // velocity lookback window; 0 disables velocity checks
+	PolicyVelocityMaxCount  uint64        // max payments per window; 0 = unlimited
+	PolicyVelocityMaxAmount string        // max summed amount per window (decimal); "" = unlimited
+	// Four-eyes approval (PRD F8c): payments at or above PolicyApprovalThreshold
+	// require a second operator to approve before broadcast. The threshold is a
+	// decimal string the composition root parses to *big.Int (same as
+	// PolicyVelocityMaxAmount), keeping config big.Int-free; ""/"0" disables
+	// four-eyes. PolicyApprovers is the set of operator identities allowed to
+	// propose/approve four-eyes payments; empty = none configured.
+	PolicyApprovalThreshold string   // min amount requiring four-eyes (decimal); ""/"0" disables
+	PolicyApprovers         []string // operator identities allowed to propose/approve; empty = none
+	// Reconciliation (M6): path to the JSON treasury manifest the reconcile command
+	// reads on-chain balances for. "" ⇒ the reconcile command derives a single-entry
+	// registry from ChainFromAddress/ChainUSDCAddress instead of reading a file. The
+	// path is plain here — reconcile.LoadRegistry validates it fail-closed.
+	ReconcileTreasuries string // path to JSON treasury manifest; "" ⇒ derive single entry from Chain* config
 }
 
 // Load reads configuration from environment variables, applying documented
@@ -74,6 +101,15 @@ func Load() (Config, error) {
 		KafkaBrokers:        splitBrokers(getEnv("PAYMENT_RAIL_KAFKA_BROKERS", "localhost:19092")),
 		OutboxPollInterval:  5 * time.Second,
 		WebhookPollInterval: 5 * time.Second,
+
+		PolicyDenylist:          getEnv("PAYMENT_RAIL_POLICY_DENYLIST", ""),
+		PolicyVelocityWindow:    0,
+		PolicyVelocityMaxCount:  0,
+		PolicyVelocityMaxAmount: getEnv("PAYMENT_RAIL_POLICY_VELOCITY_MAX_AMOUNT", ""),
+		PolicyApprovalThreshold: getEnv("PAYMENT_RAIL_POLICY_APPROVAL_THRESHOLD", ""),
+		PolicyApprovers:         splitBrokers(getEnv("PAYMENT_RAIL_POLICY_APPROVERS", "")),
+
+		ReconcileTreasuries: getEnv("PAYMENT_RAIL_RECONCILE_TREASURIES", ""),
 	}
 
 	if v := os.Getenv("PAYMENT_RAIL_SHUTDOWN_TIMEOUT_SECONDS"); v != "" {
@@ -130,6 +166,26 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("config: parse PAYMENT_RAIL_WEBHOOK_POLL_INTERVAL_SECONDS %q: %w", v, err)
 		}
 		cfg.WebhookPollInterval = time.Duration(secs) * time.Second
+	}
+
+	if v := os.Getenv("PAYMENT_RAIL_POLICY_VELOCITY_WINDOW_SECONDS"); v != "" {
+		secs, err := strconv.Atoi(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("config: parse PAYMENT_RAIL_POLICY_VELOCITY_WINDOW_SECONDS %q: %w", v, err)
+		}
+		// Fail closed: a negative window is a misconfiguration, not a disable.
+		if secs < 0 {
+			return Config{}, fmt.Errorf("config: parse PAYMENT_RAIL_POLICY_VELOCITY_WINDOW_SECONDS %q: must not be negative", v)
+		}
+		cfg.PolicyVelocityWindow = time.Duration(secs) * time.Second
+	}
+
+	if v := os.Getenv("PAYMENT_RAIL_POLICY_VELOCITY_MAX_COUNT"); v != "" {
+		n, err := strconv.ParseUint(v, 10, 64)
+		if err != nil {
+			return Config{}, fmt.Errorf("config: parse PAYMENT_RAIL_POLICY_VELOCITY_MAX_COUNT %q: %w", v, err)
+		}
+		cfg.PolicyVelocityMaxCount = n
 	}
 
 	return cfg, nil

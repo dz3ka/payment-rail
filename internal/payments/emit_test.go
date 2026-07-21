@@ -37,6 +37,7 @@ type fakeQuerier struct {
 	payments  map[uuid.UUID]db.Payment
 	outbox    []db.InsertOutboxEventParams
 	outboxErr error
+	audit     []db.AuditLog // minimal in-memory append-only audit chain (F9)
 	nextLine  int64
 }
 
@@ -65,6 +66,41 @@ func (q *fakeQuerier) outboxTypes() []string {
 		types[i] = o.EventType
 	}
 	return types
+}
+
+// --- audit chain (F9) -----------------------------------------------------
+//
+// A minimal in-memory model of the audit_log table so Create/Cancel can flow
+// through audit.Append without a database, mirroring the fake in
+// internal/audit/audit_test.go: the lock is a no-op, GetAuditHead returns the
+// tail or sql.ErrNoRows, InsertAuditEntry appends, ScanAuditChain returns rows.
+
+func (q *fakeQuerier) AcquireAuditChainLock(context.Context, int64) error { return nil }
+
+func (q *fakeQuerier) GetAuditHead(context.Context) (db.GetAuditHeadRow, error) {
+	if len(q.audit) == 0 {
+		return db.GetAuditHeadRow{}, sql.ErrNoRows
+	}
+	last := q.audit[len(q.audit)-1]
+	return db.GetAuditHeadRow{Seq: last.Seq, EntryHash: last.EntryHash}, nil
+}
+
+func (q *fakeQuerier) InsertAuditEntry(_ context.Context, p db.InsertAuditEntryParams) error {
+	q.audit = append(q.audit, db.AuditLog(p))
+	return nil
+}
+
+func (q *fakeQuerier) ScanAuditChain(context.Context) ([]db.AuditLog, error) {
+	return q.audit, nil
+}
+
+// auditActions returns the action of every recorded audit row, in order.
+func (q *fakeQuerier) auditActions() []string {
+	actions := make([]string, len(q.audit))
+	for i, a := range q.audit {
+		actions[i] = a.Action
+	}
+	return actions
 }
 
 // --- ledger-domain methods PostWithin calls -------------------------------
@@ -186,6 +222,13 @@ func TestCreate_EmitsPaymentCreated(t *testing.T) {
 	if got := q.outbox[0].AggregateID; got != pay.ID.String() {
 		t.Errorf("aggregate_id = %q, want payment id %q", got, pay.ID)
 	}
+	// F9: the same transition is recorded in the audit chain, in the same tx.
+	if got := q.auditActions(); len(got) != 1 || got[0] != "payment.created" {
+		t.Fatalf("audit actions = %v, want [payment.created]", got)
+	}
+	if got := q.audit[0].AggregateID; got != pay.ID.String() {
+		t.Errorf("audit aggregate_id = %q, want payment id %q", got, pay.ID)
+	}
 }
 
 // A successful Cancel records exactly one payment.canceled row; the preceding
@@ -207,6 +250,13 @@ func TestCancel_EmitsPaymentCanceled(t *testing.T) {
 	}
 	if got := q.outbox[1].AggregateID; got != pay.ID.String() {
 		t.Errorf("cancel aggregate_id = %q, want payment id %q", got, pay.ID)
+	}
+	// F9: create then cancel each record one audit row, in order.
+	if got := q.auditActions(); len(got) != 2 || got[0] != "payment.created" || got[1] != "payment.canceled" {
+		t.Fatalf("audit actions = %v, want [payment.created payment.canceled]", got)
+	}
+	if got := q.audit[1].AggregateID; got != pay.ID.String() {
+		t.Errorf("cancel audit aggregate_id = %q, want payment id %q", got, pay.ID)
 	}
 }
 
