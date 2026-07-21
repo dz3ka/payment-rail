@@ -38,6 +38,13 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "audit" {
+		if err := runAudit(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Usage = usage
@@ -65,5 +72,6 @@ Commands:
   submit          sign and broadcast one payment (--to, --amount, [--asset], [--key-id], [--proposer])
   approve         approve and broadcast a parked four-eyes payment (approve <approval-id> --approver=<id>)
   replay-webhook  re-drive dead-lettered webhook deliveries for a subscription (--subscription-id <uuid>)
+  audit verify    verify the append-only hash-chained audit log ([--expect-head-hash <hex>])
 `, version.String())
 }

@@ -12,6 +12,8 @@ import (
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
 
+	"github.com/dz3ka/payment-rail/internal/audit"
+	"github.com/dz3ka/payment-rail/internal/db"
 	"github.com/dz3ka/payment-rail/internal/policy"
 )
 
@@ -58,6 +60,31 @@ func TestApprovalStoreIntegration(t *testing.T) {
 		}
 	}
 
+	// scanChain reads the whole hash-chained audit log (WP2) so a subtest can find
+	// its own operator rows and re-verify the chain still links after the operator
+	// appends interleave with any state-transition rows already present.
+	scanChain := func(t *testing.T) []db.AuditLog {
+		t.Helper()
+		rows, err := db.New(sqlDB).ScanAuditChain(ctx)
+		if err != nil {
+			t.Fatalf("ScanAuditChain: %v", err)
+		}
+		return rows
+	}
+
+	// countByActorAction counts audit rows for a given operator handle + action.
+	// Actor is uuid-unique per subtest, so this isolates a subtest's rows on the
+	// shared dev DB without truncation — the same isolation the rest of the file uses.
+	countByActorAction := func(rows []db.AuditLog, actor, action string) int {
+		n := 0
+		for _, r := range rows {
+			if r.Actor == actor && r.Action == action {
+				n++
+			}
+		}
+		return n
+	}
+
 	// Case 1: propose → claim happy path. The claimed intent must equal the parked
 	// one field-for-field (amount via Cmp, since it round-trips int64→*big.Int), and
 	// MarkBroadcast on the freshly-approved row must succeed.
@@ -69,6 +96,11 @@ func TestApprovalStoreIntegration(t *testing.T) {
 		id, err := store.Propose(ctx, proposer, in)
 		if err != nil {
 			t.Fatalf("Propose = %v, want nil", err)
+		}
+
+		// F9: a successful Propose commits exactly one operator.propose audit row.
+		if got := countByActorAction(scanChain(t), proposer, "operator.propose"); got != 1 {
+			t.Errorf("operator.propose rows for proposer = %d, want 1", got)
 		}
 
 		gate := policy.NewApprovalGate(big.NewInt(1), []string{proposer, approver})
@@ -83,6 +115,17 @@ func TestApprovalStoreIntegration(t *testing.T) {
 		}
 		if got.Amount.Cmp(in.Amount) != 0 {
 			t.Errorf("claimed amount = %s, want %s", got.Amount, in.Amount)
+		}
+
+		// F9: a successful Claim commits exactly one operator.approve audit row, and
+		// the full chain must still verify OK after the operator appends interleave
+		// with any state-transition rows already in the log.
+		rows := scanChain(t)
+		if n := countByActorAction(rows, approver, "operator.approve"); n != 1 {
+			t.Errorf("operator.approve rows for approver = %d, want 1", n)
+		}
+		if res, err := audit.Verify(rows); err != nil || !res.OK {
+			t.Errorf("audit.Verify after operator appends = (%+v, %v), want OK/nil", res, err)
 		}
 
 		if err := store.MarkBroadcast(ctx, id, "0xdeadbeef"); err != nil {
@@ -113,6 +156,12 @@ func TestApprovalStoreIntegration(t *testing.T) {
 			t.Fatalf("self-approval Claim = %v, want errors.Is ErrSelfApproval", err)
 		}
 
+		// F9 fail-closed: the rejected self-approval rolled back, so NO partial
+		// operator.approve append may survive for the proposer's rejected attempt.
+		if n := countByActorAction(scanChain(t), proposer, "operator.approve"); n != 0 {
+			t.Errorf("operator.approve rows for rejected self-approver = %d, want 0 (rollback)", n)
+		}
+
 		// Row must still be pending: a valid distinct approver can still claim it.
 		if _, err := store.Claim(ctx, id, approver, func(pa policy.PendingApproval) error {
 			return gate.Authorize(pa.Proposer, approver)
@@ -141,6 +190,12 @@ func TestApprovalStoreIntegration(t *testing.T) {
 		})
 		if !errors.Is(err, policy.ErrUnknownApprover) {
 			t.Fatalf("unknown-approver Claim = %v, want errors.Is ErrUnknownApprover", err)
+		}
+
+		// F9 fail-closed: the rejected unknown-approver claim rolled back, so no
+		// operator.approve append may survive for the stranger's rejected attempt.
+		if n := countByActorAction(scanChain(t), stranger, "operator.approve"); n != 0 {
+			t.Errorf("operator.approve rows for rejected stranger = %d, want 0 (rollback)", n)
 		}
 
 		if _, err := store.Claim(ctx, id, known, func(pa policy.PendingApproval) error {
@@ -319,6 +374,52 @@ func TestApprovalStoreIntegration(t *testing.T) {
 		}
 		if err := store.Reopen(ctx, id); err == nil {
 			t.Fatalf("Reopen after broadcast = nil, want a non-nil guard error (already sent)")
+		}
+	})
+
+	// Case 9: F9 aggregate anchoring. When the proposal carries a linked payment id,
+	// BOTH operator rows must anchor to that payment id (AggregateType "payment") so
+	// `audit verify`/browsing shows one coherent story per payment — proposer's
+	// propose and approver's approve sharing the settlement's aggregate id.
+	t.Run("operator actions anchor to the linked payment id", func(t *testing.T) {
+		proposer := "prop-" + uuid.NewString()
+		approver := "appr-" + uuid.NewString()
+		paymentID := uuid.NewString()
+		in := newIntent(big.NewInt(2000))
+		in.PaymentID = paymentID
+
+		id, err := store.Propose(ctx, proposer, in)
+		if err != nil {
+			t.Fatalf("Propose = %v, want nil", err)
+		}
+		gate := policy.NewApprovalGate(big.NewInt(1), []string{proposer, approver})
+		if _, err := store.Claim(ctx, id, approver, func(pa policy.PendingApproval) error {
+			return gate.Authorize(pa.Proposer, approver)
+		}); err != nil {
+			t.Fatalf("Claim = %v, want nil", err)
+		}
+
+		rows := scanChain(t)
+		for _, want := range []struct{ actor, action string }{
+			{proposer, "operator.propose"},
+			{approver, "operator.approve"},
+		} {
+			var found *db.AuditLog
+			for i := range rows {
+				if rows[i].Actor == want.actor && rows[i].Action == want.action {
+					found = &rows[i]
+					break
+				}
+			}
+			if found == nil {
+				t.Fatalf("no %s row for %s", want.action, want.actor)
+			}
+			if found.AggregateType != "payment" || found.AggregateID != paymentID {
+				t.Errorf("%s aggregate = %s/%s, want payment/%s", want.action, found.AggregateType, found.AggregateID, paymentID)
+			}
+		}
+		if res, err := audit.Verify(rows); err != nil || !res.OK {
+			t.Errorf("audit.Verify = (%+v, %v), want OK/nil", res, err)
 		}
 	})
 }

@@ -95,7 +95,7 @@ docs/
 | **M2** ✅ | Signer + EVM chain adapter (testnet submit) |
 | **M3** ✅ | Chain-watcher with confirmations + reorg handling |
 | **M4** ✅ | Outbox → Kafka + webhook dispatcher |
-| M5 | Policy engine + audit log |
+| **M5** ✅ | Policy engine + audit log |
 | M6 | Reconciliation + proof-of-reserves report |
 | M7 | Chaos tests, load tests, published benchmark |
 

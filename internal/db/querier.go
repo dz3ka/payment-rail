@@ -12,6 +12,10 @@ import (
 )
 
 type Querier interface {
+	// Serialize the whole chain: the xact-scoped advisory lock releases at
+	// commit/rollback, so concurrent appenders can't both read the same head and
+	// assign the same seq / prev_hash, which would fork the chain.
+	AcquireAuditChainLock(ctx context.Context, lockKey int64) error
 	// Serialize check-then-insert for one signing key: the xact-scoped advisory lock
 	// releases at commit/rollback, so concurrent submissions on the same key can't
 	// both read a stale window sum and race past the ceiling.
@@ -48,9 +52,16 @@ type Querier interface {
 	// Locks the row for the duration of the claim transaction so a concurrent
 	// approver blocks rather than racing past the status guard.
 	GetApprovalForUpdate(ctx context.Context, id uuid.UUID) (PaymentApproval, error)
+	// The current tail of the chain, whose entry_hash becomes the next row's
+	// prev_hash and whose seq + 1 becomes the next seq. Callers treat sql.ErrNoRows
+	// as the empty chain: the first row is seq 1 with prev = 32 zero bytes (genesis).
+	GetAuditHead(ctx context.Context) (GetAuditHeadRow, error)
 	GetIdempotencyKey(ctx context.Context, key string) (IdempotencyKey, error)
 	GetPayment(ctx context.Context, id uuid.UUID) (Payment, error)
 	GetSettlementByTxHash(ctx context.Context, txHash string) (Settlement, error)
+	// Appends one already-hashed row. seq, prev_hash and entry_hash are computed by
+	// the app from the head read under the chain lock in the same transaction.
+	InsertAuditEntry(ctx context.Context, arg InsertAuditEntryParams) error
 	InsertEntryLine(ctx context.Context, arg InsertEntryLineParams) (EntryLine, error)
 	// Claims a key for an in-flight request. ON CONFLICT DO NOTHING means a key that
 	// already exists returns zero rows, so the caller gets sql.ErrNoRows — that is
@@ -120,6 +131,9 @@ type Querier interface {
 	// Re-drive every dead-lettered delivery for one subscription (operator action
 	// after fixing a broken endpoint): reset to pending, clear error, deliver now.
 	ReplayDeadLettered(ctx context.Context, subscriptionID uuid.UUID) (int64, error)
+	// The full chain oldest-first, so a verifier can rehash each row against its
+	// predecessor and confirm no historical row was altered or removed.
+	ScanAuditChain(ctx context.Context) ([]AuditLog, error)
 	// Count and total amount of a key's events since the window start.
 	SumVelocityWindow(ctx context.Context, arg SumVelocityWindowParams) (SumVelocityWindowRow, error)
 }

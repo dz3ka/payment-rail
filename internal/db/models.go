@@ -21,6 +21,18 @@ type Account struct {
 	CreatedAt time.Time
 }
 
+type AuditLog struct {
+	Seq           int64
+	PrevHash      []byte
+	EntryHash     []byte
+	Actor         string
+	Action        string
+	AggregateType string
+	AggregateID   string
+	OccurredAt    time.Time
+	Payload       []byte
+}
+
 type EntryLine struct {
 	ID        int64
 	EntryID   uuid.UUID

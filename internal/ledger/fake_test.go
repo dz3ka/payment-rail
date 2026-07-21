@@ -313,3 +313,21 @@ func (q *fakeQuerier) MarkApprovalBroadcast(context.Context, db.MarkApprovalBroa
 func (q *fakeQuerier) ReopenApproval(context.Context, uuid.UUID) (int64, error) {
 	panic("fakeQuerier.ReopenApproval: not used by the ledger domain")
 }
+
+// Audit-log methods belong to the audit service (F9); the ledger domain never
+// calls them, so they panic like the approval stubs above.
+func (q *fakeQuerier) AcquireAuditChainLock(context.Context, int64) error {
+	panic("fakeQuerier.AcquireAuditChainLock: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) GetAuditHead(context.Context) (db.GetAuditHeadRow, error) {
+	panic("fakeQuerier.GetAuditHead: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) InsertAuditEntry(context.Context, db.InsertAuditEntryParams) error {
+	panic("fakeQuerier.InsertAuditEntry: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) ScanAuditChain(context.Context) ([]db.AuditLog, error) {
+	panic("fakeQuerier.ScanAuditChain: not used by the ledger domain")
+}
