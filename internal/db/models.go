@@ -70,6 +70,20 @@ type Payment struct {
 	CanceledAt      sql.NullTime
 }
 
+type PaymentApproval struct {
+	ID        uuid.UUID
+	ToAddress string
+	Amount    int64
+	Asset     string
+	KeyID     string
+	PaymentID uuid.NullUUID
+	Proposer  string
+	Approver  sql.NullString
+	Status    string
+	TxHash    sql.NullString
+	CreatedAt time.Time
+}
+
 type Settlement struct {
 	ID                 uuid.UUID
 	PaymentID          uuid.UUID

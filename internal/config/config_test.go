@@ -27,6 +27,8 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("PAYMENT_RAIL_POLICY_VELOCITY_WINDOW_SECONDS", "")
 	t.Setenv("PAYMENT_RAIL_POLICY_VELOCITY_MAX_COUNT", "")
 	t.Setenv("PAYMENT_RAIL_POLICY_VELOCITY_MAX_AMOUNT", "")
+	t.Setenv("PAYMENT_RAIL_POLICY_APPROVAL_THRESHOLD", "")
+	t.Setenv("PAYMENT_RAIL_POLICY_APPROVERS", "")
 
 	cfg, err := Load()
 	if err != nil {
@@ -90,6 +92,12 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.PolicyVelocityMaxAmount != "" {
 		t.Errorf("PolicyVelocityMaxAmount = %q, want %q", cfg.PolicyVelocityMaxAmount, "")
 	}
+	if cfg.PolicyApprovalThreshold != "" {
+		t.Errorf("PolicyApprovalThreshold = %q, want %q", cfg.PolicyApprovalThreshold, "")
+	}
+	if len(cfg.PolicyApprovers) != 0 {
+		t.Errorf("PolicyApprovers = %v, want empty", cfg.PolicyApprovers)
+	}
 }
 
 func TestLoadOverrides(t *testing.T) {
@@ -111,6 +119,8 @@ func TestLoadOverrides(t *testing.T) {
 	t.Setenv("PAYMENT_RAIL_POLICY_VELOCITY_WINDOW_SECONDS", "3600")
 	t.Setenv("PAYMENT_RAIL_POLICY_VELOCITY_MAX_COUNT", "10")
 	t.Setenv("PAYMENT_RAIL_POLICY_VELOCITY_MAX_AMOUNT", "1000000")
+	t.Setenv("PAYMENT_RAIL_POLICY_APPROVAL_THRESHOLD", "5000000")
+	t.Setenv("PAYMENT_RAIL_POLICY_APPROVERS", "alice, bob,")
 
 	cfg, err := Load()
 	if err != nil {
@@ -170,6 +180,19 @@ func TestLoadOverrides(t *testing.T) {
 	}
 	if cfg.PolicyVelocityMaxAmount != "1000000" {
 		t.Errorf("PolicyVelocityMaxAmount = %q, want %q", cfg.PolicyVelocityMaxAmount, "1000000")
+	}
+	if cfg.PolicyApprovalThreshold != "5000000" {
+		t.Errorf("PolicyApprovalThreshold = %q, want %q", cfg.PolicyApprovalThreshold, "5000000")
+	}
+	wantApprovers := []string{"alice", "bob"}
+	if len(cfg.PolicyApprovers) != len(wantApprovers) {
+		t.Errorf("PolicyApprovers = %v, want %v", cfg.PolicyApprovers, wantApprovers)
+	} else {
+		for i, want := range wantApprovers {
+			if cfg.PolicyApprovers[i] != want {
+				t.Errorf("PolicyApprovers[%d] = %q, want %q", i, cfg.PolicyApprovers[i], want)
+			}
+		}
 	}
 }
 

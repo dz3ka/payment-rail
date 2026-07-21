@@ -24,6 +24,13 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "approve" {
+		if err := runApprove(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "replay-webhook" {
 		if err := runReplayWebhook(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -55,7 +62,8 @@ Flags:
   --version    print version and exit
 
 Commands:
-  submit          sign and broadcast one payment (--to, --amount, [--asset], [--key-id])
+  submit          sign and broadcast one payment (--to, --amount, [--asset], [--key-id], [--proposer])
+  approve         approve and broadcast a parked four-eyes payment (approve <approval-id> --approver=<id>)
   replay-webhook  re-drive dead-lettered webhook deliveries for a subscription (--subscription-id <uuid>)
 `, version.String())
 }

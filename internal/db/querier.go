@@ -45,6 +45,9 @@ type Querier interface {
 	// surrounding transaction, ordered by id to impose a deterministic lock order
 	// and avoid deadlocks between concurrent transfers. WP2 calls this on Querier.
 	GetAccountsForUpdate(ctx context.Context, ids []uuid.UUID) ([]Account, error)
+	// Locks the row for the duration of the claim transaction so a concurrent
+	// approver blocks rather than racing past the status guard.
+	GetApprovalForUpdate(ctx context.Context, id uuid.UUID) (PaymentApproval, error)
 	GetIdempotencyKey(ctx context.Context, key string) (IdempotencyKey, error)
 	GetPayment(ctx context.Context, id uuid.UUID) (Payment, error)
 	GetSettlementByTxHash(ctx context.Context, txHash string) (Settlement, error)
@@ -61,6 +64,9 @@ type Querier interface {
 	// Records a completed payment. status/created_at default appropriately; a
 	// canceled payment is only ever reached via CancelPayment, never inserted.
 	InsertPayment(ctx context.Context, arg InsertPaymentParams) (Payment, error)
+	// Parks a payment's full intent as a pending approval attributed to its proposer.
+	// Returns the generated id so the submit path can reference the queued row.
+	InsertPaymentApproval(ctx context.Context, arg InsertPaymentApprovalParams) (uuid.UUID, error)
 	// Links an on-chain tx to the payment it settles. ON CONFLICT (tx_hash) DO
 	// NOTHING means a re-submitted tx returns zero rows, so the caller gets
 	// sql.ErrNoRows — the "already linked" signal — and resolves it via
@@ -81,6 +87,12 @@ type Querier interface {
 	// is terminal and deliberately excluded. Ordered by created_at so the watcher
 	// processes them oldest-first.
 	ListPendingSettlements(ctx context.Context) ([]Settlement, error)
+	// Guarded on status = 'pending' so a concurrent or repeated claim matches no row;
+	// the rows-affected count lets the caller detect an already-claimed approval.
+	MarkApprovalApproved(ctx context.Context, arg MarkApprovalApprovedParams) (int64, error)
+	// Guarded on status = 'approved' AND tx_hash IS NULL so a double-broadcast matches
+	// no row; the rows-affected count lets the caller detect an already-broadcast row.
+	MarkApprovalBroadcast(ctx context.Context, arg MarkApprovalBroadcastParams) (int64, error)
 	MarkDeliveryDeadLettered(ctx context.Context, arg MarkDeliveryDeadLetteredParams) error
 	MarkDeliveryRetry(ctx context.Context, arg MarkDeliveryRetryParams) error
 	MarkDeliverySucceeded(ctx context.Context, arg MarkDeliverySucceededParams) error
@@ -99,6 +111,12 @@ type Querier interface {
 	// settle matches no row and the caller sees sql.ErrNoRows instead of
 	// re-pointing settle_entry_id. A reorged tx that re-confirms settles again.
 	MarkSettlementSettled(ctx context.Context, arg MarkSettlementSettledParams) (Settlement, error)
+	// Reverts a claimed-but-never-broadcast approval back to pending so a retry can
+	// re-claim it after a pre-send broadcast failure. Guarded on status = 'approved'
+	// AND tx_hash IS NULL: once a broadcast has landed (tx_hash set) reopen matches no
+	// row, so a sent payment can never be resurrected. The rows-affected count lets the
+	// caller detect a row that was not in the reopenable state.
+	ReopenApproval(ctx context.Context, id uuid.UUID) (int64, error)
 	// Re-drive every dead-lettered delivery for one subscription (operator action
 	// after fixing a broken endpoint): reset to pending, clear error, deliver now.
 	ReplayDeadLettered(ctx context.Context, subscriptionID uuid.UUID) (int64, error)

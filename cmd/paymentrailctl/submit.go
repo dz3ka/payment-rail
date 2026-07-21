@@ -13,19 +13,11 @@ import (
 	"syscall"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/dz3ka/payment-rail/internal/chain"
-	"github.com/dz3ka/payment-rail/internal/chain/evm"
 	"github.com/dz3ka/payment-rail/internal/config"
-	"github.com/dz3ka/payment-rail/internal/db"
 	"github.com/dz3ka/payment-rail/internal/policy"
-	"github.com/dz3ka/payment-rail/internal/settlement"
-	"github.com/dz3ka/payment-rail/internal/signerpb"
 )
 
 // runSubmit executes one payment intent end-to-end: it resolves config, dials
@@ -47,6 +39,9 @@ func runSubmit(args []string) error {
 		// successful broadcast so the chainwatcher can settle it. Empty keeps the
 		// legacy behavior — print the hash and never touch Postgres.
 		paymentIDFlag = fs.String("payment-id", "", "ledger payment id (uuid) to link this settlement to (optional)")
+		// Operator id proposing this payment. Required only when the amount lands
+		// at/above the four-eyes approval threshold (PRD F8c); ignored below it.
+		proposerFlag = fs.String("proposer", "", "operator id proposing this payment (required at/above the four-eyes threshold)")
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -76,13 +71,12 @@ func runSubmit(args []string) error {
 
 	// Validate --payment-id up front, before any config load or network dial: a
 	// malformed id must fail fast and never broadcast an unlinkable transaction.
-	var paymentID uuid.UUID
+	// The parsed value is not kept here — broadcastIntent re-parses it at link time
+	// (the intent carries it as a string); this guard only fails the command early.
 	if *paymentIDFlag != "" {
-		parsed, err := uuid.Parse(*paymentIDFlag)
-		if err != nil {
+		if _, err := uuid.Parse(*paymentIDFlag); err != nil {
 			return fmt.Errorf("submit: --payment-id %q is not a valid uuid: %w", *paymentIDFlag, err)
 		}
-		paymentID = parsed
 	}
 
 	cfg, err := config.Load()
@@ -129,140 +123,68 @@ func runSubmit(args []string) error {
 		keyID = cfg.ChainKeyID
 	}
 
-	// The chain config is operator-supplied and has no safe default for these
-	// fields, so a missing one must fail with the exact env var to set — not a
-	// zero address the signer or node would silently reject deeper in.
-	switch {
-	case cfg.ChainRPCURL == "":
-		return errors.New("submit: PAYMENT_RAIL_CHAIN_RPC_URL is required")
-	case cfg.ChainFromAddress == "":
-		return errors.New("submit: PAYMENT_RAIL_CHAIN_FROM_ADDRESS is required")
-	case cfg.ChainUSDCAddress == "":
-		return errors.New("submit: PAYMENT_RAIL_CHAIN_USDC_ADDRESS is required")
-	case keyID == "":
-		return errors.New("submit: PAYMENT_RAIL_CHAIN_KEY_ID (or --key-id) is required")
+	// The frozen intent this command will either broadcast now or, when four-eyes
+	// applies, park for a distinct second approver. Built from the validated flags;
+	// the payment id travels as a string (broadcastIntent re-parses it at link time).
+	intent := policy.Intent{
+		To:        *toFlag,
+		Asset:     *assetFlag,
+		KeyID:     keyID,
+		PaymentID: *paymentIDFlag,
+		Amount:    amount,
 	}
 
-	// The fee cap is a decimal-wei string in config (config stays big.Int-free);
-	// the composition root parses it so the adapter never re-parses config text.
-	feeCap, ok := new(big.Int).SetString(cfg.ChainMaxFeePerGasCapWei, 10)
-	if !ok {
-		return fmt.Errorf("submit: PAYMENT_RAIL_CHAIN_MAX_FEE_PER_GAS_CAP_WEI %q is not a valid decimal integer", cfg.ChainMaxFeePerGasCapWei)
-	}
-
-	evmCfg := evm.Config{
-		KeyID:              keyID,
-		ChainID:            cfg.ChainID,
-		From:               common.HexToAddress(cfg.ChainFromAddress),
-		Token:              common.HexToAddress(cfg.ChainUSDCAddress),
-		GasLimitCap:        cfg.ChainGasLimitCap,
-		MaxFeePerGasCapWei: feeCap,
-	}
-
-	// Cancel on the first termination signal so a slow RPC or signer call unwinds
-	// cleanly instead of hanging.
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	// Enforce per-key velocity limits BEFORE any signer/chain dial: like the
-	// denylist screen above, a rejected payment must never cause a dial or a
-	// broadcast. The caps come from config (config stays big.Int-free, so the
-	// composition root parses MaxAmount here); a malformed cap fails closed.
-	caps := policy.VelocityCaps{
-		Window:   cfg.PolicyVelocityWindow,
-		MaxCount: cfg.PolicyVelocityMaxCount,
-	}
-	if cfg.PolicyVelocityMaxAmount != "" {
-		maxAmount, ok := new(big.Int).SetString(cfg.PolicyVelocityMaxAmount, 10)
-		if !ok {
-			return fmt.Errorf("submit: PAYMENT_RAIL_POLICY_VELOCITY_MAX_AMOUNT %q is not a valid decimal integer", cfg.PolicyVelocityMaxAmount) // fail closed
-		}
-		caps.MaxAmount = maxAmount
-	}
-	// Only open Postgres when velocity enforcement is actually configured: with the
-	// caps disabled the legacy contract holds — no DB dial happens at all.
-	if caps.Enabled() {
-		sqlDB, err := sql.Open("postgres", cfg.DatabaseURL)
-		if err != nil {
-			return fmt.Errorf("submit: velocity check: open database: %w", err) // fail closed
-		}
-		defer func() { _ = sqlDB.Close() }()
-
-		// Charge records the spend event as part of the same locked transaction that
-		// admits it (record-on-attempt), so a later broadcast failure still consumes
-		// window budget. That over-counts only in the safe direction — recording after
-		// a successful broadcast would reopen the concurrent-double-spend window the
-		// per-key advisory lock exists to close. See ADR-0019.
-		limiter := policy.NewVelocityLimiter(newVelocityStore(sqlDB), caps)
-		if err := limiter.Charge(ctx, keyID, amount); err != nil {
-			if errors.Is(err, policy.ErrVelocityExceeded) {
-				// Audit trail for a rejected payment. key_id is safe to log (it is a
-				// signing-key handle, not a recipient or amount) — this extends the
-				// slice-1 deny-only log exception; the amount and --to are never logged.
-				logger.Warn("payment rejected by velocity policy", "key_id", keyID, "error", err)
-			} else {
-				// The velocity backend itself failed (DB unreachable, lock error, ...).
-				// Fail closed and log at ERROR so an operator sees the control is degraded.
-				logger.Error("velocity check failed; failing closed", "key_id", keyID, "error", err)
-			}
-			return fmt.Errorf("submit: velocity check: %w", err)
-		}
-	}
-
-	// Dial the isolated signer over loopback (no mTLS in slice 1); grpc.NewClient
-	// is lazy, so a bad address surfaces on the first RPC, not here.
-	conn, err := grpc.NewClient(cfg.SignerGRPCAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		return fmt.Errorf("submit: dial signer at %s: %w", cfg.SignerGRPCAddr, err)
-	}
-	defer func() { _ = conn.Close() }()
-	sc := newSignerClient(signerpb.NewSignerServiceClient(conn))
-
-	// Dial the chain node.
-	ethClient, err := ethclient.DialContext(ctx, cfg.ChainRPCURL)
-	if err != nil {
-		return fmt.Errorf("submit: dial chain rpc at %s: %w", cfg.ChainRPCURL, err)
-	}
-	defer ethClient.Close()
-
-	adapter, err := evm.NewAdapter(ethClient, sc, evmCfg, logger)
-	if err != nil {
-		return fmt.Errorf("submit: build adapter: %w", err)
-	}
-
-	// Fail fast on the wrong network before anything is signed: a signer key is
-	// bound to one chain id, and a mismatched RPC must not sign a live-value tx.
-	if err := adapter.VerifyChainID(ctx); err != nil {
-		return fmt.Errorf("submit: verify chain id: %w", err)
-	}
-
-	txHash, err := adapter.Submit(ctx, chain.PaymentIntent{
-		KeyID:  keyID,
-		Asset:  *assetFlag,
-		To:     *toFlag,
-		Amount: amount,
-	})
+	// Four-eyes gate (PRD F8c) is evaluated AFTER denylist screening — screening
+	// precedes four-eyes — and is fail-CLOSED: a malformed threshold, or a threshold
+	// set with no approvers, aborts rather than broadcasting un-approvable value.
+	gate, err := buildApprovalGate(cfg)
 	if err != nil {
 		return fmt.Errorf("submit: %w", err)
 	}
 
-	fmt.Println(txHash)
+	// Cancel on the first termination signal so a slow Postgres, RPC, or signer call
+	// unwinds cleanly. Shared by both the park (propose) and broadcast paths below.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
-	// With no --payment-id this is where the command ends: hash printed, Postgres
-	// untouched — the legacy contract. With one, persist the payment↔tx-hash link
-	// so the chainwatcher can settle it once the tx confirms.
-	if *paymentIDFlag != "" {
+	// At/above the threshold: DO NOT broadcast. Park the full intent as a pending
+	// approval and require a distinct second operator to run `approve`. The proposer
+	// must be named AND must itself be an allowlisted approver, so a parked payment
+	// can never be one that no valid pair of eyes could ever clear.
+	if gate.Required(amount) {
+		if *proposerFlag == "" {
+			return errors.New("submit: --proposer is required for a payment at or above the four-eyes approval threshold")
+		}
+		if !gate.KnownApprover(*proposerFlag) {
+			return fmt.Errorf("submit: proposer %q is not in the approver allowlist", *proposerFlag)
+		}
+
+		// The park path opens its own short-lived pool (mirrors the velocity/link
+		// convention: the path that needs Postgres opens and closes its own handle).
 		sqlDB, err := sql.Open("postgres", cfg.DatabaseURL)
 		if err != nil {
-			return fmt.Errorf("submit: tx %s broadcast succeeded but linking to payment %s failed: open database: %w", txHash, paymentID, err)
+			return fmt.Errorf("submit: four-eyes: open database: %w", err) // fail closed
 		}
 		defer func() { _ = sqlDB.Close() }()
 
-		recorder := settlement.NewRecorder(db.New(sqlDB))
-		if err := recorder.Link(ctx, paymentID, string(txHash)); err != nil {
-			return fmt.Errorf("submit: tx %s broadcast succeeded but linking to payment %s failed — reconcile manually: %w", txHash, paymentID, err)
+		id, err := newApprovalStore(sqlDB).Propose(ctx, *proposerFlag, intent)
+		if err != nil {
+			return fmt.Errorf("submit: four-eyes: record pending approval: %w", err) // fail closed
 		}
-		fmt.Printf("linked settlement: payment %s -> %s\n", paymentID, txHash)
+
+		// Audit trail for a parked high-value payment. This gate path is the one
+		// place the amount may be logged (mirroring the deny-only log exception); the
+		// below-threshold broadcast path still logs nothing about the amount.
+		logger.Info("four-eyes required: payment parked for approval",
+			"key_id", keyID, "amount", amount.String(), "approval_id", id, "proposer", *proposerFlag)
+		fmt.Printf("four-eyes required: recorded pending approval %s; a distinct approver must run: paymentrailctl approve %s --approver=<id>\n", id, id)
+		return nil // NOT broadcast: awaits a second approver
+	}
+
+	// Below the threshold (or four-eyes disabled): broadcast now, exactly as the
+	// pre-four-eyes path did. broadcastIntent prints the tx hash on success.
+	if _, err := broadcastIntent(ctx, cfg, logger, intent); err != nil {
+		return err
 	}
 	return nil
 }

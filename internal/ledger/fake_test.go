@@ -291,3 +291,25 @@ func (q *fakeQuerier) SumVelocityWindow(context.Context, db.SumVelocityWindowPar
 func (q *fakeQuerier) InsertVelocityEvent(context.Context, db.InsertVelocityEventParams) error {
 	panic("fakeQuerier.InsertVelocityEvent: not used by the ledger domain")
 }
+
+// Four-eyes approval methods belong to the approval queue (M5 / slice 3); the
+// ledger domain never calls them, so they panic like the velocity stubs above.
+func (q *fakeQuerier) InsertPaymentApproval(context.Context, db.InsertPaymentApprovalParams) (uuid.UUID, error) {
+	panic("fakeQuerier.InsertPaymentApproval: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) GetApprovalForUpdate(context.Context, uuid.UUID) (db.PaymentApproval, error) {
+	panic("fakeQuerier.GetApprovalForUpdate: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) MarkApprovalApproved(context.Context, db.MarkApprovalApprovedParams) (int64, error) {
+	panic("fakeQuerier.MarkApprovalApproved: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) MarkApprovalBroadcast(context.Context, db.MarkApprovalBroadcastParams) (int64, error) {
+	panic("fakeQuerier.MarkApprovalBroadcast: not used by the ledger domain")
+}
+
+func (q *fakeQuerier) ReopenApproval(context.Context, uuid.UUID) (int64, error) {
+	panic("fakeQuerier.ReopenApproval: not used by the ledger domain")
+}

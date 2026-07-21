@@ -60,6 +60,14 @@ type Config struct {
 	PolicyVelocityWindow    time.Duration // velocity lookback window; 0 disables velocity checks
 	PolicyVelocityMaxCount  uint64        // max payments per window; 0 = unlimited
 	PolicyVelocityMaxAmount string        // max summed amount per window (decimal); "" = unlimited
+	// Four-eyes approval (PRD F8c): payments at or above PolicyApprovalThreshold
+	// require a second operator to approve before broadcast. The threshold is a
+	// decimal string the composition root parses to *big.Int (same as
+	// PolicyVelocityMaxAmount), keeping config big.Int-free; ""/"0" disables
+	// four-eyes. PolicyApprovers is the set of operator identities allowed to
+	// propose/approve four-eyes payments; empty = none configured.
+	PolicyApprovalThreshold string   // min amount requiring four-eyes (decimal); ""/"0" disables
+	PolicyApprovers         []string // operator identities allowed to propose/approve; empty = none
 }
 
 // Load reads configuration from environment variables, applying documented
@@ -93,6 +101,8 @@ func Load() (Config, error) {
 		PolicyVelocityWindow:    0,
 		PolicyVelocityMaxCount:  0,
 		PolicyVelocityMaxAmount: getEnv("PAYMENT_RAIL_POLICY_VELOCITY_MAX_AMOUNT", ""),
+		PolicyApprovalThreshold: getEnv("PAYMENT_RAIL_POLICY_APPROVAL_THRESHOLD", ""),
+		PolicyApprovers:         splitBrokers(getEnv("PAYMENT_RAIL_POLICY_APPROVERS", "")),
 	}
 
 	if v := os.Getenv("PAYMENT_RAIL_SHUTDOWN_TIMEOUT_SECONDS"); v != "" {
