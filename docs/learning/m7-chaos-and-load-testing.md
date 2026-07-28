@@ -87,6 +87,16 @@ path M6's `runReconcile` uses) and asserts the proof-of-reserves discrepancy is 
 orthogonal oracles: one internal (the books balance), one external (settled liabilities match
 the on-chain amount).
 
+**The `je.kind <> 'opening'` exclusion in that sum is load-bearing, not tidiness.** The
+seeders inject starting balances with an `'opening'` journal entry that has a **lone credit
+line and no counterparty** — the "money enters the system" shortcut, where a real deposit
+would carry an external funding counter-entry. That entry is *deliberately unbalanced*.
+Without the exclusion, a funded source would always show a nonzero sum equal to the injected
+amount, so no scenario could ever converge and the suite would be permanently red. With it,
+the invariant says exactly what it should: **every entry the system itself posted balances.**
+Get that clause wrong in either direction and the oracle is either always-red or silently
+blind to a real imbalance — which is why a one-clause `WHERE` earns this much prose.
+
 The payoff is that the *same* three-line gate validates a crash, a connection death, a broken
 broadcast, and a triple-reorg. The reorg test can bounce the tx through Confirmed→Reorged→
 Confirmed(B)→Reorged→Confirmed(C) — accumulating three settle entries and two reversals — and
@@ -104,6 +114,26 @@ enumerate. The invariant catches any imbalance by construction.
 misses entries that balance *pairwise* while corrupting a third account, and it doesn't test
 the external reconcile view at all. The closed-ledger sum is account-agnostic; the reconcile
 check is the external cross-check. Together they're the full oracle.
+
+**Alternative 3: external chaos tooling — toxiproxy, pumba, a real `docker kill`.** This is
+the industry-standard way to do the network-partition and process-kill classes, and it was
+rejected for three reasons. It is *non-deterministic* (timing-dependent, and therefore flaky
+in CI); it is *heavyweight* (a proxy or a container-runtime dependency inside the test path,
+against a repo that has no such precedent); and — the decisive one — it tests **the
+orchestration around the process, not the transactional discipline inside it**, which is the
+thing this milestone set out to prove. In-process injection is deterministic, dependency-free,
+and runs clean under `-race`. State the limit honestly: it *cannot* exercise a real OS-level
+`SIGKILL` landing between two syscalls. For a single-Postgres-transaction design, though,
+"crash before COMMIT" is faithfully modelled by rolling back in place of committing, and
+"connection death" is faithfully modelled server-side (Decision C) — so the two fault classes
+that matter here are covered without the rig.
+
+**And convergence must be asserted on *persisted* state, read through a *surviving*
+connection.** Asserting on in-memory counters or maps would defeat the point: a restarted
+process has no in-memory state, so the only meaningful claim is about the durable record.
+Reading it back through the connection the fault killed would either error or serve stale
+data. Every assertion in the suite goes through `dbh`, the harness pool that was never in the
+blast radius.
 
 ### Decision B: inject the fault at the transactor seam, and fail *only* the commit
 
@@ -158,6 +188,20 @@ Postgres actually discarding the work — so the mock is disqualified.
 test scaffolding, and every branch is a place a real bug can hide. The seam already lets you
 substitute behavior from outside; use it.
 
+**Two small shapes inside `faultStore` are worth copying.** First, there is **deliberately no
+"no-fault" mode** — a `faultStore` *always* fails, and non-fault work runs through the real
+`ledger.NewSQLStore`. Keeping the two behaviors in two different types makes it impossible to
+accidentally get a real commit out of the saboteur. Second, the unknown-mode branch is
+`default: panic(...)`, not a returned error: an unrecognized fault mode is a *programmer*
+error in the test, and Go has no exhaustiveness check on a `switch` over an int-typed enum, so
+the panic is the runtime backstop for "this switch is meant to be exhaustive."
+
+**And the fault returns a sentinel, which the scenario matches.** `errInjectedCrash` plus
+`errors.Is` at the call site is how a scenario proves the transaction died *exactly where it
+was aimed* — rather than from some incidental constraint violation or bad connection that
+would make the whole test a false positive. Matching on an error string would be both brittle
+and capable of matching an unrelated failure.
+
 **The honest shortcut, stated.** `payments.Service.Create` builds its own `SQLStore` internally
 and is *not* injectable, so the crash and failover scenarios can't drive `Create` directly —
 they reconstruct its transaction body inline (`PostWithin` + `InsertPayment`, "faithful to
@@ -167,6 +211,15 @@ make `Create` accept an injected `ledger.Store` (constructor injection), which w
 scenario drive the *actual* method. The suite documents the gap rather than hiding it, and it
 does exercise the real `settlement.Sink` and real `evm.Adapter` directly (both *are* injectable),
 so only the payment-create body is reconstructed.
+
+One nuance keeps that compromise from being a hole rather than a gap: the reconstruction is
+**conservative**. It *omits* the outbox and audit writes, and both of those would only ever
+*add rows to the same transaction*. Extra writes inside one transaction can make atomicity
+easier to satisfy, never harder — so their absence cannot manufacture a false pass of the
+atomicity claim. The reconstruction could still drift in a way that matters (if `Create` ever
+grew a *second, independent* transaction, a single-tx model would stop representing it), which
+is exactly why the comment pins the production line range it mirrors, and why the named fix is
+constructor injection rather than a comment refresh.
 
 ### Decision C: a pool `Close()` is not a connection death — kill the backend server-side
 
@@ -200,6 +253,30 @@ and commits fine. To actually sever an in-flight transaction you have to kill th
 backend process* serving it — `pg_terminate_backend` does that — after which the doomed
 `COMMIT` fails and Postgres rolls the transaction back. The scenario then proves on the
 *surviving* pool that nothing persisted.
+
+**Why `Close()` is a no-op here comes straight out of `database/sql`'s three layers,** and
+this is the most portable paragraph in the milestone:
+
+1. **`*sql.DB` is a *pool*, not a connection.** It is a concurrency-safe handle that lazily
+   manages a set of driver connections — `sql.Open` does not even dial, which is why the
+   harness calls `PingContext` to force one open.
+2. **`BeginTx` checks *one* connection out of the pool and pins it** to the `*sql.Tx` for the
+   transaction's entire life. That connection is no longer "in" the pool.
+3. **`Close()` closes the *pool*** — it marks the pool closed and closes the *idle*
+   connections. The transaction's connection is not idle; it belongs to the tx. So it stays
+   open, the COMMIT flushes over that still-live socket, and Postgres commits. Durable write,
+   no error, and a "fault" that was a no-op.
+
+Note the reassuring flip side of the same fact: a graceful `db.Close()` during shutdown will
+**not** rip the rug out from under an in-flight commit — the transaction's connection is
+protected until the transaction ends.
+
+**And the pinning in the fix is not incidental.** `pg_backend_pid()` is *per connection*: run
+it on a random pooled connection and you learn the PID of a backend you are not about to use,
+then terminate the wrong process and prove nothing. `doomed.Conn(ctx)` reserves one physical
+connection so that the PID read and the transaction started share one backend. (`defer
+conn.Close()` on the now-dead connection is still correct — closing an already-terminated
+connection is a harmless no-op whose error is ignored.)
 
 The structural care here is worth naming: the doomed transaction runs on its **own throwaway
 pool** (a second `sql.Open` on the same DSN), and every assertion reads through the *surviving*
@@ -310,6 +387,80 @@ memory, mergeable), but for a run of tens of thousands of samples, "collect all,
 index" is simpler and exact. The harness picks exact-and-simple over approximate-and-scalable,
 which is the correct trade at this size.
 
+**Alternative 3: a channel of latency samples fanned into one collector goroutine.** This
+looks *more* idiomatic ("share memory by communicating") and it does keep the workers
+lock-free — so it deserves a real answer rather than a dismissal. Every sample now crosses a
+channel: a send, a receive, and a scheduler hop, which is *more* per-sample overhead than an
+uncontended lock, not less. And it adds a second moving part (the collector, its buffer size,
+its drain-on-shutdown) for zero benefit. A channel earns its keep when you need to **stream**
+or apply **backpressure**; here the job is to tally disjoint data and combine it once, which
+is what sharded slices do with no machinery at all. Contrast M4's webhook fan-out, where the
+consumers genuinely stream work and the plumbing is justified. "Share memory by
+communicating" is a default, not a law.
+
+### Decision G: the traffic pattern is derived from the system under test, not from the tool
+
+**The problem.** A load generator that ignores the SUT's idempotency and locking semantics
+measures an *artifact of those mechanisms* rather than the path you care about. Two lines in
+`httpOp` exist only because of how this specific system behaves, and each is the difference
+between a real benchmark and a fake one:
+
+```go
+req.Header.Set("Idempotency-Key", uuid.NewString()) // fresh per request
+src := sources[rand.IntN(len(sources))]             // spread across many funded sources
+dst := dests[rand.IntN(len(dests))]
+```
+
+**A fresh `Idempotency-Key` per request.** The API stores a keyed response and *replays* it
+for a repeated key (M1's idempotency middleware). Reuse one key and every request after the
+first returns a cached response without touching the ledger at all — you would be publishing
+the latency of a keyed lookup, which is fast, flat, and meaningless as a create-path number.
+
+**Traffic spread across many funded source accounts.** A payment create does
+`SELECT … FOR UPDATE` on the source account row inside its transaction, so concurrent creates
+against the *same* source serialize on that row lock — 32 workers collapse to an effective
+concurrency of 1 for that account, and the "concurrency" knob stops meaning anything.
+`seedAccounts` funds `--accounts` sources (default 100) with a high opening balance (`2^40`)
+via the same derived-balance opening-entry shortcut the integration tests use, so every source
+stays solvent for the whole run at `amount=1` and latency reflects the create path rather than
+a wall of `insufficient_funds` rejections. Picking a random source per request keeps row-lock
+contention low enough that concurrency actually converts into throughput.
+
+The lesson generalizes past this repo: **design the traffic pattern backward from the system's
+concurrency model.** Ask what the SUT caches, what it locks, and what it rejects, and make
+sure your generator is not accidentally exercising one of those instead of the work.
+
+### Decision H: `--migrate` is a deliberately minimal bootstrap, and says so
+
+```go
+func applyMigrations(ctx context.Context, sqlDB *sql.DB, dir string) error {
+	entries, err := os.ReadDir(dir)
+	// ... collect *.up.sql, sort lexically (filenames are zero-padded, so lexical IS apply order) ...
+	for _, f := range files {
+		stmt, _ := os.ReadFile(filepath.Join(dir, f))
+		if _, err := sqlDB.ExecContext(ctx, string(stmt)); err != nil {
+			return fmt.Errorf("apply migration %s: %w", f, err)
+		}
+	}
+	return nil
+}
+```
+
+**No version table, no down migrations, fail-fast on the first error.** The repo's hermetic
+tooling rules (ADR-0015, ADR-0025) rule out shelling out to a host `psql` or adding a
+migration-library dependency for a bench tool, and the load harness runs this exactly once
+against an empty database. Run it against an already-migrated one and it fails on the first
+`CREATE TABLE` with `relation … already exists` — which is fine, because `make down` (drop the
+volume) is the reset.
+
+Be honest about what it is not. No version tracking means it cannot apply a subset, cannot
+detect a partial application, and is **not idempotent**; a production migrator (golang-migrate,
+goose, Atlas) records applied versions and can roll forward from any state. For a run-once
+fresh-database bootstrap in a benchmark harness that machinery is pure overhead — and reusing
+the repo's own `*.up.sql` files means the benchmark schema can never drift from what the
+services actually run. The shortcut is correct *for its scope*, and naming the scope is what
+keeps it from becoming a landmine.
+
 ### Decision F: publish an *honest* benchmark — name the bottleneck, not the headline
 
 `docs/benchmark.md` reports ~568 req/s and then spends most of its words on *what that number
@@ -323,6 +474,34 @@ limitations (single-host loopback, untuned Postgres, create-only, `amount=1`). T
 teaching point: a benchmark's *value* is in its stated methodology and honest bottleneck
 attribution, not its top-line figure. A number without "here's exactly what saturated" is
 marketing.
+
+**Learn to read the table, because the reading is the deliverable.**
+
+| Run | Concurrency | Throughput | P50 | P99 |
+|---|---|---|---|---|
+| 1 | 32 | 567.93 req/s | 45.7 ms | 146.5 ms |
+| 2 | 50 | 568.03 req/s | 72.4 ms | 214.5 ms |
+
+Little's Law makes the plateau quantitative. For a stable system `L = λ · W`, i.e.
+`concurrency ≈ throughput · mean-latency`, so `throughput ≈ concurrency / mean-latency`.
+Check it: `32 / 0.0457 s ≈ 700` and `50 / 0.0724 s ≈ 690` — the same neighborhood, converging
+on the observed ~568 once the tail is folded in. When throughput is pinned while
+`concurrency / latency` stays roughly constant, latency *must* be rising in lock-step with
+concurrency, which is exactly what the table shows: the system is not getting more work done,
+the extra workers are standing in line.
+
+*Where* is the line? The create path is pure Postgres — one `ExecTx` that locks source and
+destination, runs the double-entry balance check, inserts the journal entry, its lines and the
+payment row, and in the same transaction appends an outbox event and an audit record. Every
+commit is one synchronous `fsync`-bounded transaction on a single untuned dev Postgres, now
+carrying two extra row writes per commit. Commit throughput is the wall. The Go client, the
+HTTP framing, and the harness are nowhere near saturation — which is *precisely why* the
+harness had to be lock-free and artifact-free. If the instrument were the bottleneck you would
+misread the plateau as the server's limit.
+
+The operational read, which is the actual output of a benchmark: **right-size concurrency near
+run 1 (~32 workers)** — it delivers the same throughput as 50 at roughly half the P99. That
+recommendation is only trustworthy because the measurement path is clean.
 
 ## 3. Language deep-dive
 
@@ -448,6 +627,127 @@ was avoiding elsewhere. The subtle correctness point: the counter is allowed to 
 signal, and the magnitude of the overshoot is bounded by the worker count. This is the canonical
 Go idiom for "distribute a fixed amount of work across goroutines without a coordinator."
 
+Reason about the boundary once and it stays reasoned: the first `Requests` claims see post-values
+`Requests-1, …, 1, 0` — all `>= 0`, so all proceed. The next sees `-1` and returns, as does
+every claim after it. Exactly `Requests` ops. Writing `<= 0` instead of `< 0` would turn away
+the claim that produced `0` — the *last valid slot* — and run `Requests-1` ops. (Why not a
+buffered channel of N tokens? It also gives exactly-N, at the cost of allocating and filling an
+N-length channel and paying a channel receive per request. For a pure counter with no payload
+to carry, one atomic word is the smaller and clearer answer; channels earn their place when
+tokens carry data or need buffering.)
+
+### 3f. The worker pool: `Add` before `go`, `Done` in a `defer`, and passing the pointer
+
+```go
+results := make([]workerResult, cfg.Concurrency)
+var wg sync.WaitGroup
+for i := range results {
+	wg.Add(1)
+	go func(wr *workerResult) {
+		defer wg.Done()
+		// ... hot loop writes only through wr ...
+	}(&results[i])
+}
+wg.Wait()
+```
+
+Four Go facts are doing real work here.
+
+`make([]workerResult, cfg.Concurrency)` puts every worker's state in one backing array, but
+each worker writes to a **distinct address**. A data race requires two goroutines touching the
+*same* address with at least one write; here every address has exactly one writer, so the whole
+hot path is race-free with no lock and `-race` confirms it. `wr.lats = append(...)` grows a
+slice the worker exclusively owns, so even the reallocation is private.
+
+`wg.Add(1)` runs on the **parent** goroutine, before `go`. Move it inside the child and
+`wg.Wait()` can run before that child is scheduled, observe a zero counter, and return early.
+The rule is "Add before you go, Done inside via defer" — and `defer wg.Done()` as the first
+statement means every exit path (deadline, budget spent, cancellation) decrements exactly once,
+which is why no explicit `Done` is needed at any of the returns.
+
+`go func(wr *workerResult) { … }(&results[i])` **passes** the address rather than capturing the
+loop variable. This is the classic Go concurrency bug in older code: a closure over `i` reads
+whatever `i` *is when the goroutine runs*, so every worker stampedes the final slot. `&results[i]`
+is evaluated in the parent at the moment `go` executes, once per iteration, binding each worker
+to its own slot at launch. Go 1.22's per-iteration loop scoping would also make a captured `i`
+safe here, but the explicit pointer says "this worker owns this slot" at the call site and is
+version-proof.
+
+Finally, `wg.Wait()` returning after every `Done` is a **happens-before edge** in the Go memory
+model, so the single-threaded merge afterward sees all the workers' writes with no lock at all —
+concatenate, sort once, index. Shard on the hot path, reconcile at the join.
+
+### 3g. `context.WithTimeout` and the cancelled-tail trap
+
+The run's stop condition is expressed as a *derived context*, not a hand-rolled `time.After` in
+the loop:
+
+```go
+runCtx := ctx
+if cfg.Duration > 0 {
+	var cancel context.CancelFunc
+	runCtx, cancel = context.WithTimeout(ctx, cfg.Duration)
+	defer cancel()
+}
+```
+
+`WithTimeout` returns a child that is `Done()` after the duration *or* when the parent (the
+SIGINT-cancellable context) is cancelled, whichever comes first — so a worker's stop check is
+the single predicate `runCtx.Err() != nil` and it covers both. `defer cancel()` is mandatory,
+not hygiene: skip it and the timer's resources leak until the deadline fires, which vet and
+lint will flag.
+
+The trap is that the check at the *top* of the loop is not enough:
+
+```go
+for {
+	if runCtx.Err() != nil { return }
+	// ... budget claim ...
+	t0 := time.Now()
+	oc := op(runCtx)
+	if runCtx.Err() != nil { return } // <-- discard the cancellation artifact
+	wr.lats = append(wr.lats, time.Since(t0))
+	wr.tally[oc]++
+}
+```
+
+Picture the exact instant the deadline fires: a worker has already passed the top check and is
+*inside* `op(runCtx)` with a request in flight. The timeout cancels `runCtx`, which aborts the
+in-flight `client.Do`, so `httpOp` classifies it as a `TransportError` with a **truncated**
+latency — the request was killed early, not completed. Without the second check that artifact is
+recorded, and across C workers you get up to C phantom transport errors at the tail of *every
+clean run* plus a near-zero sample that corrupts `Min`.
+
+This is the shape of the hazard worth internalizing, well beyond this file: **Go cancellation is
+cooperative, so it surfaces as an aborted operation returning an error — not as a thread kill.**
+Anything that classifies errors must therefore ask "did the run end while I was working?" before
+believing the classification. `TestRunLoadDurationModeDiscardsCancelledSample` pins it with a
+fake op that returns `TransportError` on `ctx.Done()`, asserting a clean duration run reports
+zero transport errors *and* `Min > 0`. The cost of the fix is at most one dropped sample per
+worker at the very tail; the cost of omitting it is a benchmark that quietly lies.
+
+### 3h. `Op func(ctx) Outcome`: when a function type beats an interface
+
+```go
+type Op func(ctx context.Context) Outcome
+
+func runLoad(ctx context.Context, cfg loadConfig, op Op) loadResult { ... }
+```
+
+`Op` is the harness's entire dependency-inversion boundary, and it is a *function type* rather
+than an `interface{ Do(ctx) Outcome }`. In Go those are near-equivalent when the seam has
+exactly one method and no state the caller needs to inspect — and the function is lighter: no
+struct to declare, no method set, the closure captures whatever it needs. This is the same
+instinct as `http.HandlerFunc` in the standard library. Contrast M5's `Screener`, which stayed
+an interface because a documented second *implementation* was coming; here there is one real op
+and a family of test ops, so a `func` is the right razor.
+
+The property that makes the seam pay: **the load loop times the op; the op never times itself.**
+`t0 := time.Now()` and `time.Since(t0)` bracket the call, so "how the request is issued" — HTTP
+today, gRPC tomorrow, an in-memory fake in a test — is orthogonal to "what latency is." The op
+returns only a classification; the number under test belongs to the harness. That is exactly how
+the duration-mode tests exercise the timing loop with no server and no database.
+
 ## 4. What would break
 
 - **A false green from a pool-close "fault."** `sql.DB.Close()` before COMMIT does *not* abort the
@@ -486,6 +786,46 @@ Go idiom for "distribute a fixed amount of work across goroutines without a coor
   timers, no goroutines" — so it's deterministic. The reorg *detection* is unit-tested elsewhere; the
   chaos suite tests only the *ledger-side* convergence, hand-feeding the statuses the watcher would emit.
 
+- **An always-red convergence oracle.** Drop the `je.kind <> 'opening'` filter and every seeded
+  source's lone, deliberately-unbalanced opening credit lands in the sum, so
+  `assertLedgerClosed` reports the seeded amount instead of zero on *every* scenario. Widen the
+  filter the other way and the oracle stops seeing real imbalances. The clause has to be exactly
+  "entries the system itself posted."
+
+- **A convergence assertion on the wrong number.** Asserting `settle entry count == 1` looks
+  right and is wrong under reorg: each `Confirmed(block)` posts a fresh block-hash-scoped settle
+  entry and each `Reorged` posts a reversal, so a correct system ends a triple-reorg with three
+  settles and two reversals. The raw count grows monotonically with churn; only the *net*
+  (balances back to zero, reconcile discrepancy zero) is stable across any number of cycles. The
+  alternative — a fragile `count == 2·reorgs + 1` formula — encodes the mechanism into the test.
+
+- **The loop-variable capture stampede.** Capturing `i` instead of passing `&results[i]` sends
+  every worker to the same slot. Pre-Go-1.22 this is a guaranteed bug; the explicit pointer
+  argument is immune either way.
+
+- **A lost increment from a shared tally.** One `[4]int` shared across workers makes
+  `tally[oc]++` a racing read-modify-write that silently drops counts (and trips `-race`).
+  Per-worker arrays merged after `Wait()` are race-free by construction.
+
+- **An unbounded run from a flag typo.** `--duration=0` with no `--requests` leaves neither a
+  deadline nor a budget, so the loop hammers the API until SIGINT. `runLoadtest` rejects that
+  combination *before* any database dial, so an operator typo fails fast.
+
+- **A leaked timer goroutine.** Omitting `defer cancel()` on the `WithTimeout` child leaks the
+  timer until the deadline elapses.
+
+- **A benchmark that measures the idempotency cache.** Reusing one `Idempotency-Key` makes every
+  request after the first a keyed replay that never touches the ledger — high, flat throughput
+  and a low P99 that describe a lookup, not a create.
+
+- **A benchmark that measures one row lock.** Driving every create from a single funded source
+  serializes them all on that row's `SELECT … FOR UPDATE`, collapsing effective concurrency to 1
+  and making the concurrency sweep meaningless.
+
+- **Connection churn masquerading as the concurrency limit.** Failing to drain and close the
+  response body pins each connection and defeats keep-alive, so the effective concurrency
+  becomes the dial rate rather than `--concurrency`.
+
 ## 5. Compared to what you know
 
 - **The chaos suite is Jepsen-in-miniature, in-process.** Jepsen (Clojure) injects partitions/pauses
@@ -517,6 +857,27 @@ Go idiom for "distribute a fixed amount of work across goroutines without a coor
 - **`errors.Join` is `Throwable.addSuppressed`, as a value.** Java attaches suppressed exceptions as a
   side channel on the primary throwable; Go builds a multi-error *value* you return normally, and both
   members are later matchable with `errors.Is`. No stack unwinding involved — it's just data.
+
+- **The pool / connection / transaction model maps one-for-one onto JDBC, gotcha included.**
+  `*sql.DB` ≈ a HikariCP `DataSource` pool, `*sql.Conn` ≈ a checked-out
+  `java.sql.Connection`, `*sql.Tx` ≈ that connection with `autoCommit=false`. And the analogy
+  holds *all the way to the trap*: `dataSource.close()` in Java likewise shuts the pool without
+  aborting a connection a thread is mid-transaction on, and killing the backend with
+  `pg_terminate_backend` is the same trick a Java integration test reaches for to simulate a
+  failover. This one transfers cleanly — which is exactly why it is worth remembering.
+
+- **The worker pool is a fixed thread pool joined by a `CountDownLatch`.** `sync.WaitGroup` is
+  the latch and `defer wg.Done()` is the `finally { latch.countDown() }`. The Go difference is
+  that goroutines are cheap enough that "one goroutine per worker" is the *literal*
+  implementation, not a pool abstraction over OS threads — and per-worker slices merged at the
+  end are the same sharding a Java `Collector` with a per-thread accumulator performs.
+
+- **`context.WithTimeout` is a `CancellationTokenSource(timeout)` / an `AbortController` wired
+  to a `setTimeout`.** Where it breaks: Go's cancellation is *cooperative* — nothing is
+  preempted, and the operation must actually observe the context (the HTTP client does, via
+  `NewRequestWithContext`) for cancellation to take effect. That cooperation is precisely why
+  the cancelled-tail discard exists: cancellation arrives as an aborted call returning an error,
+  not as a killed thread.
 
 ## 6. Gotchas & idioms
 
@@ -550,6 +911,35 @@ Go idiom for "distribute a fixed amount of work across goroutines without a coor
   inert. `assertLedgerClosed` scopes its sum to *one asset* precisely so another asset's rows on the
   shared DB can't dirty the verdict.
 
+- **`Outcome`'s zero value is `OK` on purpose.** `const ( OK Outcome = iota; … )` makes `OK == 0`,
+  so a freshly made `[4]int` tally reads as "no successes recorded here" rather than as some
+  garbage class. Zero-value-as-sensible-default, chosen deliberately and commented.
+
+- **`[4]int` is an array, not a slice — and that matters twice.** Arrays are *values*: assigning
+  the tally copies all four ints, and arrays are **comparable**, so the tests can write
+  `if r.ByOutcome != want`. A slice would share backing storage and would not be `==`
+  comparable; both properties are relied on.
+
+- **Drain *and* close the response body.** `io.Copy(io.Discard, resp.Body)` followed by
+  `defer func() { _ = resp.Body.Close() }()` is what lets the transport reuse the connection. A
+  body left unread pins its connection and defeats keep-alive, silently capping effective
+  concurrency at the dial rate — so the `--concurrency` knob would stop being the real limiter.
+
+- **`math/rand/v2`'s top-level functions are goroutine-safe without a global mutex.**
+  `rand.IntN(len(sources))` is safe to call from every worker; the older `math/rand` top-level
+  functions were also safe, but via a shared lock. v2 is the current idiom for exactly this
+  hot-path use.
+
+- **`fs.Visit` is how you express "exactly one of these flags".** `flag` cannot say XOR, but
+  `fs.Visit` iterates only the flags the user *actually set*, so `set["duration"] &&
+  set["requests"]` distinguishes "both explicitly given" from "both at default." A separate
+  lower-bound guard (`Duration <= 0 && Requests <= 0`) closes the case the XOR check misses.
+
+- **Guard shared test state even in a single-threaded scenario.** `brokenSendRPC`'s counters are
+  `mu`-guarded and `recordingSigner` hands out a copy via `signedNonces()` — not because the
+  scenario is concurrent, but because the *EVM adapter* is entitled to touch them from multiple
+  goroutines. Hygiene at the seam, not at the test.
+
 ## 7. Check yourself
 
 1. `faultStore.ExecTx` is byte-identical to production `SQLStore.ExecTx` up to the point `fn` returns
@@ -566,6 +956,18 @@ Go idiom for "distribute a fixed amount of work across goroutines without a coor
 5. `assertConverged` gates a triple-reorg scenario that produces three settle entries and two
    reversals. Explain how one closed-ledger `SUM` check validates that thicket without enumerating any
    individual entry — and construct a bug it would catch that `assertSettleEntryCount` alone would not.
+6. `assertLedgerClosed` filters `je.kind <> 'opening'`. For a scenario that seeds a source with an
+   opening balance of 1000 and then moves 400 to a destination, describe exactly what the assertion
+   reports if that clause is removed — and why the failure would appear in *every* scenario rather
+   than just this one.
+7. Delete the *second* `if runCtx.Err() != nil { return }` (the one after `op`). Which reported
+   fields become wrong, why does a quick manual duration run still look completely plausible, and
+   which single assertion in the suite catches it?
+8. Rewrite the budget claim as `if atomic.AddInt64(&remaining, -1) <= 0 { return }`. For
+   `Requests = 500`, exactly how many ops run, and which specific slot did you lose?
+9. Throughput is reported as `tally[OK] / elapsed.Seconds()` — successful requests only. Under a
+   server saturated into 5xx, describe how throughput and the outcome tally each move, and argue
+   why an OK-only numerator is the right choice for a *create-path* benchmark.
 
 <details>
 <summary>Answers</summary>
@@ -599,6 +1001,28 @@ Go idiom for "distribute a fixed amount of work across goroutines without a coor
    A bug it catches that a count check misses: a reversal that debits the *wrong* account (right count,
    wrong target) leaves the settle-entry count correct but the sum non-zero. `assertSettleEntryCount`
    would pass; `assertLedgerClosed` would fail. (That's exactly why the suite runs both.)
+6. Without the clause, the sum includes the `'opening'` entry's lone 1000 credit, which has no
+   debit counterparty by design. The 400 payment posts a *balanced* entry that nets to zero, so
+   `Σ(credit − debit)` comes out at **+1000**, not 0, and `assertLedgerClosed` fails. It would
+   fail in every scenario, because every scenario must seed a funded source to have anything to
+   move — removing the filter redefines "converged" as "no money was ever injected into the
+   system," which no payment test can satisfy.
+7. `ByOutcome[TransportError]` gains up to `Concurrency` phantom errors on every clean run (one
+   per worker whose in-flight request the deadline aborted), and `Min` collapses toward zero from
+   the truncated sample. A manual run still shows thousands of OKs and sane P50/P99 figures, so a
+   handful of tail artifacts hides in the noise unless you specifically read `Min` or the error
+   tally — which is what makes it dangerous. `TestRunLoadDurationModeDiscardsCancelledSample`
+   fails: it asserts `TransportError == 0` *and* `Min > 0`.
+8. 499. `atomic.AddInt64` returns the value *after* the decrement, so the claim that yields `0`
+   is the 500th and last valid slot — under `<= 0` that worker returns instead of running its
+   op. You lose exactly the final slot, which is also the boundary a naive test with a small
+   budget is least likely to notice.
+9. `ByOutcome[ServerError]` climbs while `tally[OK]` — and therefore throughput — *falls*, which
+   is the honest reading: throughput should reflect *useful work completed*, not requests
+   attempted. Counting every response would flatter a failing server that returns errors quickly,
+   and could show throughput *rising* as the system degrades. For a create benchmark the number
+   that matters is creates that actually committed; the tally keeps the failures visible on a
+   separate line rather than folding them into the headline.
 
 </details>
 
@@ -614,5 +1038,10 @@ Go idiom for "distribute a fixed amount of work across goroutines without a coor
   as one value, and how `errors.Is`/`As` traverse a joined error.
 - [PostgreSQL — `pg_terminate_backend`](https://www.postgresql.org/docs/current/functions-admin.html#FUNCTIONS-ADMIN-SIGNAL) —
   server-side backend termination, the only faithful in-process way to abort an in-flight transaction.
-</content>
-</invoke>
+- [`database/sql` package docs](https://pkg.go.dev/database/sql) — the `DB` (pool) / `Conn`
+  (checked-out) / `Tx` (pinned) lifecycle behind Decision C's three-layer explanation.
+- [The Go Memory Model](https://go.dev/ref/mem) — the happens-before guarantees that make
+  "disjoint per-worker writes plus `WaitGroup.Wait()`" correct with no locks at all.
+- [`context.WithTimeout`](https://pkg.go.dev/context#WithTimeout) and
+  [Go blog — Go Concurrency Patterns: Context](https://go.dev/blog/context) — derived deadlines,
+  cooperative cancellation, and why `defer cancel()` is mandatory rather than tidy.

@@ -76,7 +76,7 @@ make down
 
 **`--migrate` is a run-once, fresh-DB bootstrap.** It Execs `db/migrations/*.up.sql`
 in order over the pool — no version tracking, no down migrations — because
-[ADR-0025](#decision) rules out shelling to host `psql` or adding a migration
+[ADR-0025](adr/0025-loadtest-hermetic-migration-bootstrap.md) rules out shelling to host `psql` or adding a migration
 dependency. Re-running it against an already-migrated database fails fast on the first
 `CREATE TABLE` (`relation … already exists`); that is expected. `make down` (which
 runs `docker compose down -v`) is the reset.
@@ -149,5 +149,5 @@ Flags: `--url` (default `http://localhost:8080`), `--dsn` (default the
 ## Decision
 
 The one design decision worth recording is the `--migrate` hermetic bootstrap; see
-ADR-0025 (shadow vault). The harness itself follows the existing subcommand idiom
+[ADR-0025](adr/0025-loadtest-hermetic-migration-bootstrap.md). The harness itself follows the existing subcommand idiom
 (`submit`/`reconcile`) and adds no new dependency.

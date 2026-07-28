@@ -388,7 +388,7 @@ func (w *Watcher) poll(ctx context.Context) []Status {
 			// not a new transition — so only positive evidence the tx left the
 			// canonical chain (a vanished receipt or a divergent canonical header)
 			// emits again, as Reorged. A transient read failure is never that
-			// evidence: it is logged and skipped, preserving the ADR-0012 invariant
+			// evidence: it is logged and skipped, preserving the ADR-0028 invariant
 			// that a transport fault never manufactures a Reorged.
 			receipt, err := w.reader.TransactionReceipt(ctx, hash)
 			if err != nil {
@@ -445,7 +445,7 @@ func (w *Watcher) poll(ctx context.Context) []Status {
 // reverse+reapply cycle instead of being dropped from the tracked map. Callers
 // hold w.mu. It is only ever reached on positive evidence the tx left the
 // canonical chain (a vanished receipt or a divergent canonical header), never on a
-// transient read failure — preserving the ADR-0012 no-reorg-on-transport-fault
+// transient read failure — preserving the ADR-0028 no-reorg-on-transport-fault
 // invariant.
 func (w *Watcher) reverse(t *tracked, tx chain.TxHash, bHash common.Hash, bNum uint64, out *[]Status) {
 	w.emit(t, tx, PhaseReorged, bHash, bNum, 0, out)

@@ -35,6 +35,16 @@ stops being canonical. The watcher is chain-only: it emits a go-ethereum-free `S
 so nothing in `evm` knows a ledger exists. That is the same dependency inversion the M2
 adapter used for its `Signer`/`ethRPC` seams, applied to the *output* edge.
 
+Two structural choices in that file do most of the work. `Run(ctx, sink)` is a nine-line
+ticker loop; every decision worth testing — depth arithmetic, dedupe, reorg detection,
+eviction — lives in `poll(ctx) []Status`, a pure synchronous function that takes no timer
+and returns its observations as a value. And the watcher's *input* seam is a three-method
+`chainReader` interface it declares itself, which both `*ethclient.Client` and go-ethereum's
+in-memory `simulated.Client` satisfy — so the *same* watcher code runs against a live node
+and against a real in-process EVM that mines signed transactions and performs a real reorg.
+Decisions G and H are about why those two shapes are the reason this milestone is provable
+at all.
+
 `internal/settlement/settlement.go` is the sink. A `Recorder` writes the payment↔tx-hash
 link at submit time; a `Sink` consumes the watcher's `Status` stream and posts the
 double-entry effects that move a provisional credit into the `onchain_settlement` house
@@ -42,7 +52,10 @@ account when a tx confirms (`settle`), back out when it reorgs (`reverse`), and 
 finality as a pure status flip with no money movement (`finalize`). Every effect rides
 the M1 ledger's `PostWithin`/`ExecTx` seam so the journal entry and the settlement-row
 status change commit in one database transaction — the settlement never stores a balance
-and never bypasses double-entry, exactly like payments.
+and never bypasses double-entry, exactly like payments. `Recorder.Link` is itself idempotent
+in an instructive way: it inserts `ON CONFLICT (tx_hash) DO NOTHING RETURNING`, and reads the
+existing row back *only* after a proven conflict — to tell a benign re-link of the same pair
+(silent success) from a tx already bound to a *different* payment (loud refusal). See §3g.
 
 `cmd/chainwatcher/main.go` is the composition root that wires a real `ethclient` node,
 a real Postgres-backed sink, and — the part that makes restarts safe — a startup **seed**
@@ -145,6 +158,41 @@ reorg could still legitimately reverse it, reintroducing exactly the bug Decisio
 The constructor fails loudly rather than build a watcher that silently drops
 still-reversible transactions.
 
+**The half of this that an in-memory eviction alone does *not* fix.** There are **two**
+unbounded things here, and `delete(w.tracked, tx)` bounds only one. The other is the *seed
+query* — `ListPendingSettlements`, run at startup and again on every re-scan tick — which
+reads from Postgres and has no idea a tx was skipped in RAM. Without a durable signal it
+would keep returning every ever-settled row forever, so the query grows
+O(all-settlements-ever) even while the map stays small. That is why `PhaseFinalized` is not
+just an in-process phase: it flows out through the existing `StatusSink` (the watcher's only
+outward seam) and the sink writes a terminal `finalized` **row status** that the query
+filters out. The classic bug this avoids is "I fixed the leak I could see."
+
+Two rejected alternatives are worth naming. *An in-process-only skip* — stop re-checking a
+deeply buried tx but never tell the database — leaves the seed query unbounded, above. *An
+age filter on the query* (`WHERE created_at > now() - interval …`) would wrongly drop a
+legitimately old row that is still genuinely pending: **age is not finality.** The terminal
+status is the minimal signal that respects the layering — the watcher is the only component
+holding both the head and the anchor, and `Status` is its only channel outward, so a
+terminal `Phase` is the *only* way that knowledge can reach the DB without inverting the
+dependency direction.
+
+**And a scoping note on the knob itself.** `finalityDepth` is a `NewWatcher` *parameter*
+(validated `> depth`) but a hardcoded constant at the call site:
+
+```go
+const defaultFinalityDepth uint64 = 64 // Ethereum's ~2-epoch finality distance
+w, err := evm.NewWatcher(client, cfg.WatcherConfirmations, defaultFinalityDepth, cfg.WatcherPollInterval, log)
+```
+
+The *seam* is parameterized; the *config surface* is not — there is no
+`cfg.WatcherFinalityDepth` env var. That is deliberate YAGNI-for-config: 64 is correct for
+every chain this watcher currently talks to, and the trigger to promote it is explicit (a
+second chain with a different finality distance). Shipping the env var now would ship an
+untested knob with exactly one valid value; parameterizing the seam now makes the eventual
+promotion a one-line change. **Parameterize the seam, defer the config surface until a
+second caller proves the need.**
+
 ### Decision C: reorg-safe ledger effects are exact mirror entries keyed by block hash
 
 **The problem.** When a tx confirms we move money; when it reorgs we must move it back;
@@ -193,6 +241,14 @@ compose an effect and its bookkeeping atomically. `finalize` is deliberately *no
 shared transaction — it moves no money (settle already did), so it is a pure guarded
 status flip in its own single-statement `ExecTx`, and it resolves neither the payment nor
 the clearing account.
+
+**Alternative: refactor M1's synchronous `Create` into an async `pending → settled`
+lifecycle.** That is what a greenfield design would probably do — no clearing account, the
+payment simply isn't "real" until the chain says so. Rejected as pure regression risk
+against a working, tested money path for no correctness gain. A clearing account is the
+standard accounting answer to "value in flight": the house account holds the funds while
+they are on-chain, balances stay *derived* (M1's rule, never relaxed), and the entire
+settlement layer is **additive** — M1's `payments.Create` is byte-for-byte untouched.
 
 ### Decision D: idempotency is anchored on the row-status guard, *not* the ledger's unique constraint
 
@@ -280,6 +336,14 @@ re-seed resets it to `pending` with no anchor; money stays conservatively safe (
 destination keeps its provisional credit) but a slice-3 reconciliation pass is the real
 fix.
 
+**Alternative: overload `Track` with a `recovered bool` flag** instead of adding a second
+method. Rejected: it pushes a branch into every future reader of `Track` and welds the
+recovery concern to the fresh-tracking concern permanently. Two small methods with distinct
+names and distinct pre-seeded state read better and test in isolation — `seed`'s branch
+logic is unit-tested against a `spyTracker` with no live watcher, no RPC node, and no
+database (see §3h's `txTracker` seam). The transferable idiom: **seed the recovered state so
+the normal loop does the right thing, rather than special-casing recovery inside the loop.**
+
 ### Decision F: the poll-riding retry — recover a dropped sink effect on the next ordinary tick
 
 **The problem.** `Run` logs and *swallows* a sink error so the watcher keeps polling
@@ -313,6 +377,128 @@ the entry (say, to `Reorged`) between the emit and the failure handler is never 
 back to `Mined` — we only roll back an entry that is *still* where we left it. Only
 `Confirmed` failures are rolled back; `Reorged` and `Finalized` failures need no rollback
 because their recovery anchor is the persisted row, re-derived on the next pass anyway.
+
+**Alternative: an `undelivered map[TxHash]Status` retry buffer.** The conventional answer,
+and the one that looks more "real." Rejected because it is a parallel data structure with a
+full lifecycle of its own — add on failure, drain on success, evict on reorg, bound its
+size, and reason about it racing the poll loop. The poll loop is *already* a convergent
+retry engine: it re-derives truth from the chain every tick. Rewinding a phase **reuses**
+that engine; a buffer **duplicates** it. Fewer moving parts, and nothing new that can leak.
+
+### Decision G: `poll` is the testable core, `Run` is a nine-line I/O shell
+
+**The problem.** A watcher is intrinsically about *time* and *the network* — the two things
+that make tests slow, flaky, and non-deterministic. If the confirmation logic lives inside
+the ticker loop, the only way to test it is to wait for real ticks or inject a fake clock.
+
+**The chosen approach — split the two concerns physically.**
+
+```go
+func (w *Watcher) Run(ctx context.Context, sink StatusSink) error {
+    ticker := time.NewTicker(w.interval)
+    defer ticker.Stop()
+    for {
+        select {
+        case <-ctx.Done():
+            return nil
+        case <-ticker.C:
+            for _, s := range w.poll(ctx) { /* log + dispatch to sink */ }
+        }
+    }
+}
+```
+
+`Run` contributes only three things a test cannot cheaply assert anyway: *when* to poll,
+*that cancellation stops the loop*, and *that transitions get dispatched*. Everything worth
+testing is in `poll`, which takes no timer and returns `[]Status`. The unit tests drive
+`Pending → Mined → Confirmed` by calling `poll` five times against a scripted fake,
+advancing a plain `blockNumber` field between calls — no `time.Sleep`, no fake clock, no
+eventually-consistent assertions.
+
+**Alternative: an exported `<-chan Status` streaming API.** The obvious "Go-native" design:
+the watcher owns a channel and pushes to consumers. Deferred as YAGNI, but note the
+*testability* cost it would have carried — a channel lifecycle forces every test to spin a
+consumer goroutine, drain with a `select` + timeout, and reason about buffering and close
+semantics. `poll() []Status` is a plain value-in/value-out contract. If a streaming consumer
+is ever needed, `Run` is the natural place to fan the slice onto a channel; the core does
+not change. This "functional core, imperative shell" split is the single most transferable
+idea in the watcher.
+
+### Decision H: both of the watcher's seams are *consumer-defined* interfaces, so `evm` stays a leaf
+
+**The problem.** The watcher needs to read a chain (inbound) and drive ledger effects
+(outbound). The lazy wiring for both is to name the concrete type: depend on
+`*ethclient.Client`, and have `Run` call `settlement.Sink` directly. Each choice quietly
+destroys something — the first makes the watcher un-fakeable without standing up a JSON-RPC
+server, the second makes `internal/chain/evm` transitively import `internal/ledger` and
+`internal/db`, pointing the dependency arrow from the *stable* core (chain observation) at
+*volatile* policy (money rules), and making the watcher's unit tests need a database.
+
+**The chosen approach — the interface is declared by whoever *consumes* it, and stays as
+narrow as the consumption.** Inbound, the watcher declares exactly the three reads it makes:
+
+```go
+type chainReader interface {
+    TransactionReceipt(ctx context.Context, txHash common.Hash) (*types.Receipt, error)
+    HeaderByNumber(ctx context.Context, number *big.Int) (*types.Header, error)
+    BlockNumber(ctx context.Context) (uint64, error)
+}
+
+var (
+    _ chainReader = (*ethclient.Client)(nil) // the live JSON-RPC client
+    _ chainReader = (simulated.Client)(nil)  // the in-memory EVM's client
+)
+```
+
+Go's *implicit* satisfaction is what makes this legal: `*ethclient.Client` never declares it
+implements `chainReader` — it simply has the methods. That is what lets you retrofit an
+interface onto a third-party type you do not own, and it is why the production client and
+go-ethereum's simulated backend answer the *same* three-method contract, which is the entire
+reason the reorg e2e can be a real EVM rather than a hand-written fake.
+
+Outbound, the same move in the other direction: `evm` declares `StatusSink` —
+
+```go
+type StatusSink interface {
+    OnStatus(ctx context.Context, s Status) error
+}
+```
+
+— and `settlement.Sink` satisfies it. The arrow now points inward (`settlement → evm`,
+never the reverse) and `evm` imports nothing above itself. `cmd/chainwatcher`, the
+composition root, is the only place that knows both types exist. The rejected variant here
+is a **channel of `Status` the settlement layer ranges over**: more Go-looking on the
+surface, but it buys a goroutine lifecycle, a buffer-size decision, and back-pressure
+semantics, and it *loses* the synchronous error return that Decision F's retry is built on.
+Channels earn their keep when producer and consumer have independent lifecycles; here they
+do not.
+
+### Decision I: the periodic re-scan calls `Track`/`Resume` from a second goroutine — and that is safe for three specific reasons
+
+**The problem.** Seeding only at startup means a payment submitted while `chainwatcher` is
+already running is not watched until the next restart. The fix is a periodic re-scan — but
+it runs in its own goroutine and calls the *public* `Track`/`Resume` while the poll
+goroutine is mutating the same map. An earlier comment in `main.go` explicitly warned this
+was unsafe.
+
+**The chosen approach — make it safe by construction rather than by adding a lock.** Three
+properties hold simultaneously:
+
+- `tracked` holds **pointers** (`map[chain.TxHash]*tracked`), and the map header itself is
+  protected by `w.mu`, which both goroutines take.
+- The **single poll goroutine is the only writer that mutates or deletes existing entries.**
+- `Track` and `Resume` are **idempotent**: each takes the mutex, does
+  `if _, ok := w.tracked[tx]; ok { return nil }`, and only inserts a brand-new entry for an
+  unseen key. Neither ever touches an entry that already exists.
+
+So the two goroutines can never write the same `*tracked`: the re-scan only ever *adds* new
+keys, the poll loop only ever *touches* existing ones. No new lock, no channel, no ownership
+handoff. This is why the "idempotent, never a reset" property of `Resume` is load-bearing
+rather than a nicety — **if `Resume` reset an already-tracked entry**, a re-scan tick could
+stomp a live entry the poll loop had just advanced to `PhaseReorged`, wiping a reorg
+mid-flight *and* racing the poll goroutine's read of that same pointer. Break any one of the
+three properties and you get a lost-reorg race that `-race` catches intermittently and
+production hits rarely and catastrophically.
 
 ## 3. Language deep-dive
 
@@ -458,7 +644,173 @@ through to `Track` rather than `Resume`-ing against a zero anchor. Note also `in
 and `uint64(...)` conversions at the boundary: Postgres `BIGINT` is signed (`int64` in Go),
 but a block number is naturally `uint64`, so the code converts explicitly at each crossing —
 Go never converts integer types implicitly, which is exactly what forces you to notice the
-signedness mismatch at the boundary rather than discovering it as a wrap-around bug.
+signedness mismatch at the boundary rather than discovering it as a wrap-around bug. The
+round-trip is lossy *in general* — a `uint64` above 2^63 wraps negative — but safe *here*,
+because a block height will not approach 2^63 in the lifetime of the universe. It is
+correct-by-domain, not correct-in-general, which is exactly the kind of thing that earns a
+comment so the next reader does not "fix" it into a range check that can never fire. And
+because the `.Valid` gate makes a pre-migration-`0004` row degrade gracefully to `Track`,
+**no backfill migration was needed at all** — `TestSeedTracksSettledRowWithNullAnchor` pins
+that case.
+
+### 3e. The confirmation-depth off-by-one: making `N` mean exactly `N`
+
+`confirmations` counts the mined block itself as one confirmation, with a guard against
+unsigned underflow:
+
+```go
+func confirmations(head, mined uint64) uint64 {
+    if head < mined { return 0 } // head lagging a fresh receipt
+    return head - mined + 1
+}
+```
+
+The original code always transitioned a freshly sighted tx to `PhaseMined` and left
+`PhaseConfirmed` to a *later* pass through the `Mined` branch. With `N = 1` that is wrong: a
+tx mined at the current head is *already* at depth 1 and should confirm immediately, but the
+old shape emitted `Mined` and waited for the head to advance to depth 2. Threshold `N`
+silently behaved like `N+1`. The fix is a short-circuit *inside* the pending branch:
+
+```go
+if depth >= w.depth {
+    // Already buried deep enough on first sighting (N=1, or a backlog catch-up
+    // where head ran far ahead): confirm in this same pass.
+    t.phase = PhaseConfirmed
+    w.emit(t, tx, PhaseConfirmed, receipt.BlockHash, h, depth, &emitted)
+    continue
+}
+```
+
+Two Go-flavoured lessons ride along. First, `head - bNum + 1` on `uint64` **wraps to a
+gigantic number** if `head < bNum` — a transiently lagging head after a reorg — which in a
+signed language would be a harmless negative but here reads as an instant spurious
+"finalized." Every depth computation in the watcher is gated on `head >= bNum` for exactly
+that reason. Second, off-by-ones in threshold arithmetic are invisible to the type checker
+*and* to a happy-path test that only ever uses `N=12`;
+`TestWatcherConfirmationDepthConfigurable` sweeps `N=1` and `N=3` and asserts the exact
+confirming head and `Depth == N`. **Always test the smallest legal threshold** — `N=1` is
+the value that exposes the bug.
+
+### 3f. `errors.Is` vs `errors.As`, and a third-party error's `Error()` as an exfiltration surface
+
+The reorg gate leans on identity matching through the wrap chain:
+
+```go
+if errors.Is(err, ethereum.NotFound) { /* receipt gone: block orphaned */ }
+```
+
+`ethereum.NotFound` is a *sentinel* — a package-level `var NotFound = errors.New("not
+found")`. `errors.Is` walks the `Unwrap` chain comparing against it, so it still matches if
+some layer wrapped it with `%w`; `err == ethereum.NotFound` would silently stop matching the
+day anyone adds context. And never compare `err.Error()` strings: fragile, and — as the rest
+of this section shows — the message text is not something you should be reading at all.
+
+`errors.As` is the typed-extraction cousin, and the redaction path is where it earns its
+keep:
+
+```go
+func RedactRPCError(err error) string {
+    var uerr *url.Error
+    if errors.As(err, &uerr) {
+        endpoint := uerr.URL
+        if u, perr := url.Parse(uerr.URL); perr == nil && u.Host != "" {
+            endpoint = u.Scheme + "://" + u.Host // drop userinfo, path, and query
+        }
+        return fmt.Sprintf("%s %s: %v", uerr.Op, endpoint, uerr.Err)
+    }
+    return err.Error()
+}
+```
+
+go-ethereum's HTTP transport wraps failures in `*url.Error`, whose `Error()` embeds the full
+request URL — and managed nodes carry the API key in the path (`/v3/<KEY>`) or the query
+(`?key=<KEY>`). Logging the raw error on a routine node-unreachable tick leaks that key into
+your logs. You pass `errors.As` a *pointer to the target* (`&uerr`, so the parameter is
+`**url.Error` under the hood) because `As` needs somewhere to write; it walks the same
+`Unwrap` chain `Is` does, but matches on *dynamic type* instead of identity. The rebuild
+keeps `scheme://host` — enough to triage which host is down — and drops every place a secret
+can hide. Note that `main.go` formats the already-redacted **string** with `%s` rather than
+re-wrapping the raw error with `%w`: if the `*url.Error` re-entered the chain, some later
+`%v` would print it in full and undo the redaction. The general shape: **the secret is
+inside a third-party error's `Error()` output, not in a field you control, so redaction has
+to happen at the log boundary by downcasting to the concrete error type.**
+
+### 3g. `ON CONFLICT DO NOTHING RETURNING` → `sql.ErrNoRows`: insert-or-verify without a race
+
+`Recorder.Link` must be idempotent under redelivery *and* must refuse to silently rebind a
+broadcast transaction to a different payment:
+
+```go
+_, err := r.q.InsertSettlement(ctx, db.InsertSettlementParams{PaymentID: paymentID, TxHash: txHash})
+if err == nil {
+    return nil // freshly linked
+}
+if !errors.Is(err, sql.ErrNoRows) {
+    return fmt.Errorf("settlement: link payment %s to tx %s: %w", paymentID, txHash, err)
+}
+existing, gerr := r.q.GetSettlementByTxHash(ctx, txHash)
+// ...
+if existing.PaymentID != paymentID {
+    return fmt.Errorf("settlement: tx %s already linked to payment %s, refusing to relink to %s", ...)
+}
+return nil // already linked to this payment; idempotent no-op
+```
+
+The query is `INSERT … ON CONFLICT (tx_hash) DO NOTHING RETURNING *`. The `DO NOTHING` +
+`RETURNING` combination is the elegant part: a fresh row comes back as a row, a conflict
+comes back as *zero* rows, which sqlc surfaces to Go as `sql.ErrNoRows`. So **the database's
+conflict resolution is the concurrency control** — there is no read-then-write TOCTOU
+window, because the write is what detects the conflict, and the read only runs *after* the
+conflict is already proven, purely to classify it. Note the deliberate asymmetry in that
+classification: re-linking the same pair is a silent success, but a tx pointed at a
+different payment is a hard error. Money-movement code should fail loud on ambiguity.
+
+### 3h. Cancellation also arrives *disguised as an error* — and `txTracker`, a test-only seam
+
+The re-scan loop is the standard cancellable-ticker shape with one non-obvious guard:
+
+```go
+for {
+    select {
+    case <-ctx.Done():
+        return ctx.Err()
+    case <-ticker.C:
+        rows, err := querier.ListPendingSettlements(ctx)
+        if err != nil {
+            if ctx.Err() != nil {
+                return ctx.Err() // cancel raced the query; report clean shutdown
+            }
+            log.Error("chainwatcher: rescan list pending settlements", "error", err)
+            continue // transient DB error: skip this tick, retry next
+        }
+        // ...
+    }
+}
+```
+
+The `if ctx.Err() != nil` check *inside the error branch* is the part worth internalizing.
+Once the `select` has committed to the `<-ticker.C` arm it is no longer waiting on
+`<-ctx.Done()`. If the context is cancelled while `ListPendingSettlements` is in flight, the
+context-aware driver aborts the query and returns an **error** — which surfaces here, not at
+the `select`. Without the guard, every clean shutdown would log a scary query-failure line.
+**Cancellation does not only arrive via `ctx.Done()`; it also arrives as an error from any
+context-aware call you were blocked in.** The `continue` on a genuine transient error
+encodes the other half: one failed scan must never stop confirmation tracking.
+
+The `seed` helper takes a narrow interface for one reason only — testability:
+
+```go
+type txTracker interface {
+    Track(tx chain.TxHash) error
+    Resume(tx chain.TxHash, blockHash string, blockNumber uint64) error
+}
+```
+
+`*evm.Watcher` satisfies it implicitly and the `evm` package does not know the interface
+exists. `main_test.go` passes a `spyTracker` that records which method was called, so the
+"settled-with-anchor → `Resume`, everything-else → `Track`" decision is verified with no
+watcher, no RPC node, and no database. The point is not that a second production
+implementation is expected — it is that **the narrow interface *is* the test seam.**
 
 ## 4. What would break
 
@@ -483,6 +835,26 @@ signedness mismatch at the boundary rather than discovering it as a wrap-around 
   their own; without eviction the map and the RPC load grow without bound. Avoided by the
   finality-depth eviction — and the `finalityDepth > depth` constructor guard stops an
   operator from setting finality so shallow it evicts still-reversible transactions.
+
+- **An unbounded *seed query* — the leak you can't see.** Evicting from the map in memory
+  leaves Postgres returning every ever-settled row from `ListPendingSettlements` on every
+  re-scan tick, forever. Avoided by making finality **durable**: a terminal `finalized`
+  status the query filters out, written by the sink from the `PhaseFinalized` transition.
+
+- **A re-scan tick stomping a live tracked entry.** The second goroutine is safe only
+  because `Track`/`Resume` are strict insert-if-absent no-ops. Make `Resume` reset an
+  existing entry and a re-scan can overwrite a `PhaseReorged` the poll loop just detected —
+  wiping a reorg mid-flight and racing the poll goroutine on the same `*tracked` pointer.
+
+- **An unsigned depth underflow reading as instant finality.** `head - bNum + 1` on `uint64`
+  wraps to a near-`MaxUint64` value whenever `head < bNum` (a transiently lagging head), and
+  every depth threshold would then compare true. Avoided by gating every depth computation
+  on `head >= bNum` — and by `confirmations` returning 0 rather than wrapping.
+
+- **A leaked goroutine on shutdown.** `Run` selects on `ctx.Done()` and returns, with
+  `defer ticker.Stop()` releasing the runtime timer. `range ticker.C` with no cancellation
+  arm leaks the loop for the process lifetime;
+  `TestWatcherRunReturnsNilOnContextCancel` proves the loop returns promptly.
 
 - **A lost `Confirmed` effect after a sink failure.** A swallowed sink error would strand
   the settlement until a restart. Avoided by the poll-riding retry: roll the entry back to
@@ -538,6 +910,34 @@ signedness mismatch at the boundary rather than discovering it as a wrap-around 
   You must check `.Valid` before trusting the value, the same way you'd `.isPresent()`
   before `.get()`.
 
+- **The poll-riding retry is a Kubernetes controller's reconcile loop.** Don't re-queue the
+  failed item; re-derive desired state from the source of truth every tick and let
+  convergence handle it. The watcher's poll loop *is* the reconcile loop, and rewinding a
+  phase re-enqueues the tx into that reconciliation implicitly. That framing is also the
+  argument against the rejected `undelivered` buffer: a controller that also keeps a retry
+  queue has two reconcilers.
+
+- **Consumer-defined interfaces + implicit satisfaction are TypeScript's structural typing.**
+  `*ethclient.Client` fits `chainReader` because it has the methods, not because it says so.
+  Where the analogy breaks: Go resolves this at *compile* time across package boundaries,
+  and an interface is a real runtime value (a two-word `(type, data)` pair) — which is where
+  the nil-interface trap in §6 comes from.
+
+- **`poll() []Status` instead of `<-chan Status` is choosing `List<T>` over `Flux<T>`.** Same
+  trade you would make in Java: a pure return value is trivially testable, while a reactive
+  stream drags scheduling and buffering into every test.
+
+- **`simulated.Backend` is Testcontainers, not Mockito.** It is a real implementation of the
+  dependency's semantics running in-process — it genuinely mines blocks and genuinely
+  reorgs — so it catches behavior a hand-written fake would get subtly wrong. The
+  hand-written `fakeReader` and the simulated backend are complements: the fake scripts exact
+  sequences, the backend proves the sequences are real.
+
+- **Idempotent `Track` under a shared mutex is `ConcurrentHashMap.computeIfAbsent`.** Insert
+  if missing, never touch if present. The extra mile Go's version buys here is that the
+  never-touch-if-present invariant is what makes a *second, separately mutating* goroutine
+  safe — something `computeIfAbsent` alone would not give you.
+
 ## 6. Gotchas & idioms
 
 - **`iota`'s zero value is a usable signal.** `PhasePending` is `iota` == 0, and the
@@ -567,6 +967,51 @@ signedness mismatch at the boundary rather than discovering it as a wrap-around 
   a block number is unsigned. Go forces the conversion, which is a feature: it makes the
   signedness crossing visible instead of a silent wrap.
 
+- **`var _ evm.StatusSink = (*Sink)(nil)` is a compile-time assertion and nothing else.**
+  `_` discards the value and `(*Sink)(nil)` is a typed nil pointer, so no `Sink` is
+  allocated and no method runs. Its only job is to break the *build* — not some far-away
+  test — the moment `OnStatus`'s signature drifts from the interface. It is the optional,
+  implementer-side stand-in for Java's mandatory `implements`, and its optionality is the
+  point: a type can satisfy an interface it has never heard of.
+
+- **The nil-interface trap.** An interface value holds a `(type, data)` pair, so a *nil
+  concrete pointer* boxed into an interface is `!= nil`. `NewWatcher` guards `if reader ==
+  nil` for the *untyped* nil, but `var c *ethclient.Client; NewWatcher(c, …)` sails past that
+  guard and panics on first use. Conversely `Run(ctx, nil)` with a literal nil sink is
+  legal and deliberately means "log only" — the slice-1 behavior, kept by an
+  `if sink == nil { continue }` in the loop.
+
+- **The in-memory fake lies about transaction abort.** The `db.Querier` fake in
+  `settlement_test.go` returns `ErrDuplicateEntry` without poisoning anything, so a green
+  unit test does **not** prove the reasoning in Decision D. Treat a fake as a shape check,
+  not a semantics oracle; the real Postgres behavior lives in an integration test and in
+  your head.
+
+- **`simulated.Backend.Fork` only switches chains on a *strictly longer* side chain.** The
+  reorg e2e commits **twice** after forking (length 2 > 1). Commit once and the side chain
+  ties the original, go-ethereum falls back to a probabilistic tie-break, and the test
+  passes only sometimes. A deterministic reorg test has to win the fork outright.
+
+- **`common.Hash` is a value type** (`[32]byte`), so copying an anchor hash under the lock is
+  a cheap array copy and `hdr.Hash() != bHash` is a plain value comparison — no aliasing to
+  reason about. That is what makes the snapshot in §3a both safe and cheap. Contrast
+  `*big.Int`, which is a mutable heap object you must never share.
+
+- **`log-and-continue`, not `return err`, inside the seed loop.** One malformed tx hash must
+  not abort tracking for every other pending settlement. The idiom is
+  `if err := …; err != nil { log; continue }` inside the range.
+
+- **A down migration must demote before it narrows.** `0004`'s down runs
+  `UPDATE … SET status='settled' WHERE status='finalized'` *before* re-narrowing the `CHECK`
+  constraint to exclude `'finalized'` — the other order has the constraint reject the very
+  rows it is being added to constrain. Migration ordering is a correctness concern, not
+  boilerplate.
+
+- **Redaction discipline extends to the settlement logs.** `logResult` logs `payment_id`,
+  `tx_hash`, `block_hash`, `asset` — never amounts. A successful reversal logs at `warn` (a
+  settled tx leaving the chain is notable), an insufficient-funds reject at `warn`, a plain
+  settle at `info`.
+
 ## 7. Check yourself
 
 1. `PhaseConfirmed` is non-terminal, so the watcher re-verifies every settled tx forever —
@@ -587,6 +1032,18 @@ signedness mismatch at the boundary rather than discovering it as a wrap-around 
 6. The poll-riding retry sets `t.phase = PhaseMined` but guards on `ok && t.phase ==
    PhaseConfirmed`. Construct the interleaving that guard defends against, and say what
    would break without it.
+7. Remove the `if depth >= w.depth` short-circuit from the pending branch. What exactly does
+   a caller who configured `N = 1` observe, and why does the same test with `N = 12` stay
+   green?
+8. Finality-depth eviction `delete`s from the tracked map. Name the *second* unbounded thing
+   that eviction does not touch, and the exact mechanism that bounds it.
+9. The re-scan goroutine calls the public `Track`/`Resume` while the poll goroutine mutates
+   the same map. State the three properties that make that safe, and pick the one whose
+   removal produces a *lost reorg* rather than a plain data race.
+10. `rescan` returns `ctx.Err()` from two different places. Why can the `<-ctx.Done()` arm
+    alone not catch a cancellation that arrives while the DB query is in flight?
+11. The reorg e2e calls `backend.Commit()` twice after `Fork`. What fails — and how often —
+    if you call it once?
 
 <details>
 <summary>Answers</summary>
@@ -631,6 +1088,42 @@ signedness mismatch at the boundary rather than discovering it as a wrap-around 
    back to `Mined`, discarding the reorg the poll just detected. The guard ensures the
    rollback only applies to an entry still sitting where the failed emit left it.
 
+7. `confirmations` counts the mined block itself, so a tx mined at the current head is
+   already at depth 1 and should confirm on first sighting. Without the short-circuit the
+   pending branch always emits `Mined` first and waits for the head to advance to depth 2 —
+   threshold `N` silently behaves like `N+1`. With `N = 12` the extra block is invisible: the
+   tx still confirms, just one block later than the contract says, and any test that only
+   asserts "eventually confirms" passes. `N = 1` is the smallest legal threshold and the only
+   one where the off-by-one changes an observable outcome, which is why the depth test sweeps
+   `N=1` and `N=3` and asserts the exact confirming head.
+
+8. The seed query, `ListPendingSettlements`, run at startup and on every re-scan tick. An
+   in-memory `delete` never reaches Postgres, which still holds every ever-settled row as
+   `settled`, so the query returns them all forever — O(all-settlements-ever). It is bounded
+   by making finality *durable*: `PhaseFinalized` flows out through `StatusSink`, `finalize`
+   writes the terminal `finalized` row status, and the query filters that status out.
+
+9. (a) `tracked` holds pointers and the map header is guarded by `w.mu`, taken by both
+   goroutines; (b) the single poll goroutine is the only writer that mutates or deletes an
+   *existing* entry; (c) `Track`/`Resume` are strict insert-if-absent no-ops that never touch
+   an existing entry. Removing (a) is a plain data race on the map. Removing (c) is the
+   nastier one: a `Resume` that reset an existing entry lets a re-scan tick overwrite a
+   `PhaseReorged` the poll loop just detected, so the reorg is silently lost *and* the two
+   goroutines write the same `*tracked` pointer.
+
+10. The `select` has already committed to the `<-ticker.C` arm by the time the query runs; it
+    is no longer waiting on `<-ctx.Done()`. A cancellation mid-query is delivered by the
+    context-aware driver as an *error return from the query*, which lands in the `err != nil`
+    branch. The `if ctx.Err() != nil` guard re-checks the context there and returns
+    `ctx.Err()`, so the caller's `errors.Is(err, context.Canceled)` filter treats it as the
+    clean shutdown it is instead of logging a query failure on every deploy.
+
+11. `simulated.Backend.Fork` only makes the side chain canonical once it is *strictly
+    longer*. One commit leaves the fork tied with the original chain (length 1 vs 1), so
+    go-ethereum resolves it by a probabilistic tie-break: the reorg lands sometimes and not
+    others, and the test flakes — passing locally, failing in CI, or vice versa. Two commits
+    (2 > 1) make the switch deterministic.
+
 </details>
 
 ## 8. Further reading
@@ -645,4 +1138,15 @@ signedness mismatch at the boundary rather than discovering it as a wrap-around 
   why confirmation depth is probabilistic and finality (~2 epochs / 64 blocks) is the depth
   past which a reversing reorg is treated as economically impossible.
 - [go-ethereum `ethclient/simulated`](https://pkg.go.dev/github.com/ethereum/go-ethereum/ethclient/simulated) —
-  the in-process backend the watcher's reorg tests drive through `poll` deterministically.
+  the in-process backend the watcher's reorg tests drive through `poll` deterministically;
+  see `Fork`/`Commit` for the strictly-longer-chain rule.
+- [Go blog — Working with Errors in Go 1.13](https://go.dev/blog/go1.13-errors) — `%w`,
+  `errors.Is` (identity through the chain) vs `errors.As` (typed extraction), and why `==`
+  on a sentinel breaks the day someone adds context.
+- [Effective Go — Interfaces and methods](https://go.dev/doc/effective_go#interfaces) — the
+  "accept interfaces, return structs" idiom and implicit satisfaction, which is what lets
+  `chainReader` and `StatusSink` be declared by their consumers.
+- [PostgreSQL — `INSERT … ON CONFLICT`](https://www.postgresql.org/docs/current/sql-insert.html#SQL-ON-CONFLICT)
+  and [error codes](https://www.postgresql.org/docs/current/errcodes-appendix.html) —
+  `DO NOTHING RETURNING` as the insert-or-verify idiom, and `25P02 in_failed_sql_transaction`,
+  the aborted-transaction state behind Decision D.

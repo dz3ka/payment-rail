@@ -195,6 +195,23 @@ for n == int(pageSize) {
 }
 ```
 
+**Why the sort key is `(created_at, id)` and not just `created_at` — this is *the* keyset
+bug.** `created_at` is not unique; many settlements can share a millisecond. Cursor on it
+alone and you are stuck between two broken options: `> cursor_at` **skips every other row
+that shares the cursor's timestamp** (a silent undercount), while `>= cursor_at` **re-reads
+the whole timestamp bucket forever** (an infinite loop on a tie). Appending the unique `id`
+makes the sort key *total*, so `>` advances past exactly the rows already seen and no
+others.
+
+And the comparison has to be a **row-value comparison**, not two `AND`ed scalar ones.
+`(a, b) > (x, y)` means lexicographic order — `a > x`, OR (`a = x` AND `b > y`) — which is
+not what `a > x AND b > y` says. The naive `AND` form requires *both* to be strictly
+greater, so with the cursor at `(10:00:00, id=5)` a row at `(10:00:00, id=9)` evaluates
+`created_at > 10:00:00` as false and is dropped entirely. Postgres executes the row-value
+form against a composite index on `(created_at, id)` as a **single index range scan starting
+at the cursor**, so each page costs O(page size) regardless of how deep into the table you
+are — which is the performance half of the argument below.
+
 **Alternative: `LIMIT/OFFSET` pagination.** `OFFSET N` makes Postgres scan and discard the
 first `N` rows on every page, so the walk degrades to O(N²) over the table, and — worse — an
 insert or delete during the walk *shifts the offset window*, so a row can be skipped or
@@ -212,6 +229,23 @@ table end is reached. A subtlety worth internalizing: if the table length is an 
 multiple of `pageSize`, the final full page is followed by one more query that returns
 *zero* rows (`n = 0`), which then fails the loop condition. That one extra empty round-trip
 is the price of not tracking a separate "is there more" flag — cheap and unambiguous.
+
+**And the alternative nobody should skip past: one `GROUP BY` aggregate.** A single
+`SELECT p.asset, s.status, SUM(p.amount) … GROUP BY p.asset, s.status` would produce exactly
+these numbers, in one round-trip, with less code to get wrong. The keyset walk was chosen
+here **deliberately as the exercise**, and that is worth stating rather than dressing up: if
+all you ever need is the scalar sum, the grouped aggregate is the better engineering. The
+cursor earns its place the moment the job needs to *stream* rows — to emit per-row
+discrepancies, checkpoint progress across a long run, or bound memory over a table that
+does not fit — and reconcile is the archetype of a job that grows those needs. The
+transferable skill is the pattern; the honest note is that this instance does not yet need
+it.
+
+**A related "why not read the obvious number" worth recording.** `expected` is computed by
+summing settlement *rows* rather than by reading the house clearing account's live balance —
+even though that balance is right there and would be one query. The house balance fuses
+`confirmed` and `finalized` value together and cannot isolate the finalized portion, and
+that split is precisely what the bridge term in Decision B needs.
 
 ### Decision D: `int64` ledger, `*big.Int` chain, negate the liability sum in Go
 
@@ -240,6 +274,52 @@ negates it once to turn "what users hold" into "what we owe them," a positive nu
 proof-of-reserves inequality can compare against `actual`. Doing the negation in Go rather
 than SQL keeps the query a plain signed balance sum (reusable, obvious) and puts the
 domain-specific sign flip next to the comment that explains it.
+
+**Where the sign comes from, so the negation isn't cargo cult.** Double-entry means that for
+one asset every credit on one account is a debit on another, so all balances sum to zero.
+Split them into the house settlement account and everyone else:
+
+```
+houseBalance + Σ(non-house balances) = 0
+⟹  Σ(non-house balances) = −houseBalance
+```
+
+Users are net creditors of the system, so the signed non-house sum is *negative* — they are
+owed. Liabilities is that magnitude expressed positively, hence exactly one negation. This
+is the classic off-by-a-sign bug and it is invisible to code review, because both signs look
+plausible on the page: **negate zero times and an undercollateralized treasury reports
+healthy; negate twice and a healthy one reports a breach.** It can only be pinned by a test
+with a concrete number, which is what the integration test does — it seeds a lone *debit* of
+5000 on a non-house account (so the query returns `−5000`) and asserts
+`row.LiabilitiesMinor == 5000`, proving the negation is present, applied once, and in the
+right direction, end to end through real Postgres.
+
+### Decision E: a stdlib-only `BalanceReader` port, and fail-closed decoding of untrusted bytes
+
+**The problem.** The `balanceOf` result comes back from a chain node the process does not
+control, decoding a value an attacker can influence — they control token contracts and
+holder balances. And the caller (`internal/reconcile`, the CLI, the tests) should not have
+to import go-ethereum just to ask "what is this address's balance?"
+
+**The chosen approach — split the seam and quarantine the untrusted decoding.** The port
+`chain.BalanceReader` is one method over **stdlib only** (`context`, `math/big`): no
+go-ethereum, no address types, no RPC. The adapter `internal/chain/evm.BalanceReader` is
+where every go-ethereum type and every fail-closed guard lives, so the untrusted-bytes
+handling is confined to one file that one set of tests covers.
+
+**The razor cut worth naming: the adapter did *not* get its own `contractCaller` seam.** It
+reused the existing `ethRPC` interface by adding one method, `CallContract` — so the same
+client that broadcasts payments now answers balance queries. A parallel seam would have
+doubled the fakes and the wiring for no isolation benefit, since the two paths already share
+a client and a redaction helper. **Add a method to the seam you have before you grow a
+second seam.**
+
+**And the registry that feeds it fails closed too.** Treasuries load from a JSON manifest
+(`PAYMENT_RAIL_RECONCILE_TREASURIES`) following the same bare-top-level-array, fail-closed
+convention as the denylist and the keyring, with a single-entry fallback derived from
+`Chain*` config when the path is empty. The same razor pass folded away a `--format json` /
+`WriteJSON` output (no consumer yet), an `UnexplainedSurplus` report field, and a parallel
+proof-of-reserves slice — deferred, not designed out, but absent until something needs them.
 
 ## 3. Language deep-dive
 
@@ -375,6 +455,102 @@ DRY away: each package declares exactly the methods *it* calls, so `internal/rec
 (which never sums liabilities) doesn't drag `SumNonHouseLiabilities` into its interface.
 The interface belongs to the consumer, so each consumer gets its own.
 
+The same seam is what makes the integration test cheap. sqlc generates against a `DBTX`
+interface that *both* `*sql.DB` and `*sql.Tx` satisfy, so `db.New(tx)` — a real querier bound
+to a transaction the test rolls back in `t.Cleanup` — fits `reconcileDBQuerier` exactly as
+well as `db.New(sqlDB)` does. The test drives the *same* `reconcileReport` function with a
+real database and a fake `BalanceReader`, and leaves the database byte-identical. (Two more
+isolation details worth stealing: every seeded row is keyed on a `"RECON-"+uuid` asset, and
+the assertions are per-asset rather than on `report.Clean`, so unrelated residue in a shared
+dev database can't flip the result.)
+
+### 3e. The cursor's zero values, and injecting the clock
+
+Two small things in `AggregateSettlements` and `reconcileReport` are worth naming because
+both are Go answers to problems other languages solve with a sentinel.
+
+```go
+var cursorAt time.Time
+var cursorID uuid.UUID
+```
+
+These are declared with no initializer, so they hold `time.Time{}` and the nil UUID. They
+are only ever *read* inside `for n == int(pageSize)`, and that loop runs only if the first
+page came back full — which means the first-page `range` already executed `pageSize` times
+and overwrote both. So the zero values are never actually used as a cursor; they exist to
+give the variables a scope wide enough to survive the loop. Coming from a language with
+`undefined`/`null`, the instinct is a `*time.Time` sentinel; in Go the typed zero value plus
+a "the loop cannot run before the assignment" invariant is cleaner and allocation-free.
+(`cursorAt, cursorID = r.CreatedAt, r.ID` is a tuple assignment: both right-hand sides are
+evaluated before either assignment, the same mechanism that makes `a, b = b, a` a swap with
+no temporary.)
+
+And the clock is a **parameter**, not a call:
+
+```go
+func reconcileReport(ctx context.Context, q reconcileDBQuerier, br chain.BalanceReader,
+	reg reconcile.Registry, pageSize int32, now time.Time) (reconcile.Report, error)
+```
+
+`runReconcile` — the thin shell that parses flags, dials Postgres and the chain node, and
+owns the exit code — passes `time.Now()`; the test passes a fixed instant so the report
+timestamp is deterministic. That test helper is a neat one-liner worth knowing: `func
+fixedNow() (t time.Time) { return }` uses a **named return value**, which is zero-initialized,
+so a bare `return` yields `time.Time{}` without naming the type twice. Injecting the clock is
+the standard Go answer to "how do I test code that stamps the current time," and it is the
+same pure-core / thin-shell split as Decision A's exit code: process, network, and clock live
+in the shell; the core is a function you can drive deterministically.
+
+One more deliberate line in that function: `if _, ok := actuals[e.Asset]; !ok` seeds an empty
+`[]AddressBalance{}` for every registry asset *before* any balance read, so `BuildReport`'s
+key union produces a row for an asset even when the manifest lists no address for it. The
+report never silently drops a treasury asset.
+
+### 3f. Decoding attacker-influenced bytes: four guards, and `%s` as a security decision
+
+```go
+func (r *BalanceReader) BalanceOf(ctx context.Context, token, holder string) (*big.Int, error) {
+	if !common.IsHexAddress(token) {
+		return nil, fmt.Errorf("evm: token is not a valid address: %w", chain.ErrInvalidIntent)
+	}
+	if !common.IsHexAddress(holder) { /* ... same ... */ }
+	tokenAddr := common.HexToAddress(token)
+
+	msg := ethereum.CallMsg{To: &tokenAddr, Data: packERC20BalanceOf(common.HexToAddress(holder))}
+	out, err := r.rpc.CallContract(ctx, msg, nil)
+	if err != nil {
+		return nil, fmt.Errorf("evm: balanceOf call failed: %s", RedactRPCError(err))
+	}
+	if len(out) < erc20WordLen { // 32
+		return nil, fmt.Errorf("evm: balanceOf returned %d bytes, want at least %d (not a token contract?)",
+			len(out), erc20WordLen)
+	}
+	return new(big.Int).SetBytes(out[:erc20WordLen]), nil
+}
+```
+
+**Validate the addresses before the RPC**, because `common.HexToAddress` does not fail on
+garbage — it pads or truncates to 20 bytes and hands back a wrong-but-plausible address.
+The test pins the ordering by setting the fake RPC to return "CallContract must not be
+reached" and asserting the error is still `errors.Is(err, chain.ErrInvalidIntent)`.
+
+**Guard `len(out) < 32` before `SetBytes`**, because `big.Int.SetBytes` interprets *whatever
+bytes you give it* as a big-endian unsigned integer and never errors. A call to an EOA or a
+contract without `balanceOf` returns empty or short data; decode that and "this address is
+not a token" silently becomes "this treasury holds 7 wei," which reconcile then reports as a
+gigantic discrepancy. **Slice to exactly 32** (`out[:erc20WordLen]`) because an ABI encoder
+can return more than one word; the all-`0xff` test confirms the full `2²⁵⁶−1` decodes without
+truncation, which is also the concrete reason `Actual` is a `*big.Int` and not an `int64`.
+
+**And note `%s` where the rest of the codebase writes `%w`.** A managed-node RPC URL carries
+an API key in its path, and go-ethereum's `*url.Error` embeds that URL in its message.
+`RedactRPCError` produces a redacted *string* — but re-wrapping it with `%w` around the
+original error would leave the raw, key-bearing error reachable via `errors.Unwrap`,
+re-leaking the secret to anyone who walks the chain. `%s` flattens to the redacted text and
+**severs the chain on purpose**. The `%w` on the address guards is equally deliberate, since
+callers do match `chain.ErrInvalidIntent`. Which verb to use is a security decision here,
+not a style one.
+
 ## 4. What would break
 
 - **A monitor that can't tell insolvency from an outage.** Collapse the outcome into
@@ -412,6 +588,27 @@ The interface belongs to the consumer, so each consumer gets its own.
   set on a bad manifest, the command would read zero balances, find zero discrepancies, and
   report CLEAN — a false all-clear. It fails closed: any read/parse/validate/duplicate error
   returns a zero `Registry` and a non-nil error, so a broken manifest is exit 2, not a lie.
+
+- **A cursor that skips rows sharing a timestamp.** `created_at` alone is not unique: `>`
+  drops the cursor row's siblings (undercount, and therefore a phantom deficit), `>=` loops
+  forever on a tie. The `(created_at, id)` tuple makes the ordering total. Writing the
+  comparison as `created_at > $1 AND id > $2` instead of a row-value comparison reintroduces
+  the skip, because a same-timestamp row fails the first conjunct.
+
+- **"Not a token contract" decoded as a tiny balance.** `big.Int.SetBytes` never errors and
+  never validates length; four bytes of junk become a small number. The `len(out) < 32`
+  guard is the difference between an honest error and a fabricated discrepancy, and the
+  `IsHexAddress` guard stops a malformed treasury address from being coerced into a
+  plausible one before the call is even made.
+
+- **An API key re-leaked through `errors.Unwrap`.** Redacting an RPC error and then wrapping
+  the *original* with `%w` leaves the key-bearing error reachable by anyone walking the
+  chain. The `%s` on `RedactRPCError(err)` severs it deliberately.
+
+- **The sign flip applied zero or two times.** Negate zero times and an undercollateralized
+  treasury reports healthy; negate twice and a healthy one reports a breach. Both compile,
+  both read plausibly, and neither is catchable by review — only a test asserting a concrete
+  `LiabilitiesMinor` against a known-signed sum pins it.
 
 ## 5. Compared to what you know
 
@@ -472,6 +669,28 @@ The interface belongs to the consumer, so each consumer gets its own.
   Amounts go to stdout; the amount-free `logReconcileResult` summary goes to stderr; the
   exit code carries clean/discrepancy/error. Three channels, three audiences.
 
+- **`SetBytes` never errors and never bounds-checks *meaning*.** It is a pure byte→bignum
+  reinterpretation. Every piece of validation — length, address format, "is this even a
+  token?" — is your job, up front, before the call.
+
+- **`%w` vs `%s` can be a security decision.** `%w` keeps the wrapped error reachable
+  (right for sentinels callers match on); `%s` flattens it and severs the chain (right when
+  the wrapped error's *text* is the thing you are protecting against). Pick by what the
+  caller needs to recover, not by habit.
+
+- **Named-return bare-return for "the zero of T".** `func fixedNow() (t time.Time) { return }`
+  yields `time.Time{}` in one line without repeating the type. Easy to over-use; reserve it
+  for exactly this case.
+
+- **Inject the clock as a parameter.** `now time.Time` beats calling `time.Now()` inside,
+  for the same reason the exit code is returned rather than exited: the deterministic core
+  should not reach out to the process.
+
+- **Roll back the test transaction *and* namespace the seeded rows.** `BeginTx` +
+  `t.Cleanup(Rollback)` keeps the shared dev database byte-identical; keying every seeded
+  row on a `"RECON-"+uuid` asset and asserting per-asset (not on `report.Clean`) keeps the
+  case robust against residue other tests leave behind.
+
 ## 7. Check yourself
 
 1. `runReconcile` returns an `int` and `main` does `os.Exit(runReconcile(...))`. Name the
@@ -490,6 +709,15 @@ The interface belongs to the consumer, so each consumer gets its own.
    one return?
 6. `discrepancy := new(big.Int).Sub(actual, expected)` allocates a fresh receiver. What
    exactly breaks in the printed report if you write `actual.Sub(actual, expected)` instead?
+7. The cursor compares `(created_at, id) > ($1, $2)` rather than `created_at > $1 AND id >
+   $2`. Construct a concrete two-row example where the `AND` form silently drops a row, and
+   say what the dropped row does to the reported discrepancy.
+8. `BalanceOf` wraps its address-validation errors with `%w` but its RPC error with `%s`.
+   Explain why the `%s` is a security requirement rather than a stylistic choice, and what
+   an attacker (or an over-helpful log aggregator) recovers if you "fix" it to `%w`.
+9. Reconcile could compute `expected` with one `GROUP BY SUM` query instead of a keyset
+   walk. Argue honestly for the aggregate, then name the concrete requirement that would
+   flip the decision back to the cursor.
 
 <details>
 <summary>Answers</summary>
@@ -521,6 +749,28 @@ The interface belongs to the consumer, so each consumer gets its own.
    show the *discrepancy* value in the on-chain-balance field — corrupting the very number
    the reader trusts. Allocating a fresh receiver leaves `actual` and `expected` intact for
    the struct.
+7. Cursor at `(10:00:00, id=5)`; the next row is `(10:00:00, id=9)` — same millisecond,
+   higher id. The row-value form takes the tie branch (`created_at = x AND id > y`) and
+   returns it. The `AND` form evaluates `created_at > 10:00:00` as **false** and drops it
+   entirely, along with every other row sharing that timestamp. Those settlements are never
+   summed into `expected`, so `expected` comes out too small and the report shows a
+   fabricated *surplus* discrepancy — exactly the failure mode a reconciliation job exists to
+   rule out.
+8. A managed-node RPC URL carries the API key in its path, and go-ethereum's `*url.Error`
+   embeds the full URL in its message. `RedactRPCError` reduces it to `scheme://host`, but
+   `%w` around the *original* error would leave that original reachable through
+   `errors.Unwrap` — so any later `%v`, any `errors.As` walk, or any log aggregator that
+   renders the cause chain prints the key in full. `%s` flattens the redacted text and
+   severs the chain, which is the whole point. The address guards keep `%w` because callers
+   legitimately match `chain.ErrInvalidIntent` and the sentinel carries no secret.
+9. For the current requirement — a scalar per-(asset, status) sum — the aggregate wins on
+   every axis: one round-trip instead of N, no cursor to get wrong (no tuple comparison, no
+   tiebreaker, no termination condition), and the correctness-under-concurrent-inserts
+   argument becomes moot because the whole sum is one snapshot. The keyset walk is chosen
+   here as the exercise, and that should be said out loud rather than rationalized. It flips
+   back the moment the job must *stream*: emitting a per-row discrepancy line, checkpointing
+   progress so a long run can resume, or bounding memory over a table that will not fit —
+   none of which a single `SUM` can do.
 
 </details>
 
@@ -536,3 +786,8 @@ The interface belongs to the consumer, so each consumer gets its own.
   pagination beats `OFFSET` for both performance and correctness under concurrent writes.
 - [Effective Go — Interfaces and methods](https://go.dev/doc/effective_go#interfaces_and_methods) —
   implicit satisfaction and the "accept interfaces" idiom behind the narrow querier seam.
+- [PostgreSQL — Row and Array Comparisons](https://www.postgresql.org/docs/current/functions-comparisons.html#ROW-WISE-COMPARISON)
+  — the `ROW(a,b) > ROW(x,y)` lexicographic semantics that make the keyset tiebreaker work,
+  and why the `AND` form is not the same thing.
+- [Go blog — Working with Errors in Go 1.13](https://go.dev/blog/go1.13-errors) — `%w` versus
+  `%s`, and the "when to deliberately break the chain" judgment behind the redacted RPC error.

@@ -403,7 +403,7 @@ func TestWatcherReversesAndReapplies(t *testing.T) {
 	}
 }
 
-// TestWatcherConfirmedIgnoresTransientRPCError preserves the ADR-0012 invariant in
+// TestWatcherConfirmedIgnoresTransientRPCError preserves the ADR-0028 invariant in
 // the newly non-terminal confirmed state: a transport fault while re-verifying a
 // confirmed tx's anchor must never be mistaken for a reorg. Only positive evidence
 // (a vanished receipt) reverses it.
