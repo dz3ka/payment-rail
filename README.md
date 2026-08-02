@@ -104,7 +104,7 @@ either file — see [`docs/threat-model.md`](docs/threat-model.md).
 ```
 cmd/            one directory per binary (thin entrypoints)
 internal/       private packages (config, version, service bootstrap, ...)
-deploy/         local infra config (otel-collector.yaml, ...)
+deploy/         local infra config (otel-collector.yaml) + preview-env manifest
 docs/
   architecture/ C4 context + container diagrams
   adr/          architecture decision records
