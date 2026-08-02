@@ -62,3 +62,4 @@ Numbering is sequential (`NNNN-kebab-title.md`). Status is one of:
 | [0026](0026-chaos-suite-build-tag-gating.md) | Gating the chaos suite: the repo's first build tag & DSN skip (M7) | Accepted |
 | [0027](0027-in-process-fault-injection-via-seams.md) | In-process fault injection through existing seams (M7) | Accepted |
 | [0028](0028-chain-watcher-and-reorg-harness.md) | Chain watcher: poll seam, two-pronged reorg detection, simulated-backend harness (M3) | Accepted (terminal-phase consequences superseded by ADR-0014) |
+| [0029](0029-preview-environment-caller-and-template.md) | Preview environments: topology-only PaymentStack template & reusable-workflow caller | Accepted |

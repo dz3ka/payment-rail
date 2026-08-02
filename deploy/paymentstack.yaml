@@ -1,0 +1,56 @@
+apiVersion: platform.bosun.dev/v1alpha1
+kind: PaymentStack
+metadata:
+  name: payment-rail
+spec:
+  apps:
+    # One app, and only one, because cmd/api is payment-rail's only real HTTP
+    # listener (cmd/api/main.go:29, hardcoded :8080) and cmd/ledger runs
+    # in-process under it (ADR-0006). cmd/chainwatcher, cmd/outboxrelay and
+    # cmd/webhookd are long-running workers that listen on nothing, and
+    # cmd/signer defaults to loopback (internal/config/config.go:87) — the
+    # address is overridable, but nothing here overrides it.
+    # They are absent deliberately, not by oversight: the CRD creates
+    # messaging.topics independently of apps, so listing them here would buy
+    # three unschedulable Deployments and three endpoint-less Services and
+    # nothing else. Re-decide this set when payment-rail publishes images.
+    - name: api
+      # Placeholder, and it is meant to be obvious as one: payment-rail builds
+      # no container images today — there is no Dockerfile, and Makefile:22-23
+      # produces native binaries into ./bin. The 0.0.0-unpublished tag is
+      # picked so it cannot be mistaken for a release. On a real cluster this
+      # pod sits in ImagePullBackOff; the preview proves topology, not a
+      # running system.
+      image: ghcr.io/dz3ka/payment-rail/api:0.0.0-unpublished
+      # port must be stated: the CRD defaults it to 8080, which happens to be
+      # right here, but the API's bind address is a constant in the code rather
+      # than config, so pinning it keeps the Service honest if that constant
+      # ever moves.
+      port: 8080
+      # replicas is omitted: the default of 1 is what a preview wants, and a
+      # second replica of an image that cannot be pulled buys nothing.
+  database:
+    # A preview is a single throwaway Postgres, not an HA cluster.
+    instances: 1
+    storageSize: 2Gi
+  messaging:
+    # clusterRef names an existing Redpanda cluster in this namespace; there is
+    # no default, so a topic with nowhere to live is rejected rather than
+    # guessed at. Nothing in either repo creates this cluster today, so on a
+    # real cluster the Topic child stays not-Ready and the stack never goes
+    # Ready — a second known red alongside the ImagePullBackOff above, and the
+    # name to reconcile against whatever actually provisions the broker.
+    clusterRef: payment-rail
+    topics:
+      # The one topic payment-rail publishes to: outbox.DefaultTopic
+      # (internal/outbox/envelope.go:24), which the relay wires in verbatim.
+      # Kept verbatim rather than shortened, which bounds this template to PR
+      # numbers <= 9999: bosun derives the Topic's app.kubernetes.io/name label
+      # as <preview-name>--stack--<topic>, and at five digits that reaches 64
+      # characters and the API server rejects it. Shortening the name here
+      # would make the template disagree with the code, so the bound is
+      # accepted instead; the real fix belongs in bosun's name budget.
+      - name: payment-rail.events
+        partitions: 1
+        # replicationFactor is omitted: it defaults to 1, which is all a
+        # single-broker preview Redpanda can satisfy.
