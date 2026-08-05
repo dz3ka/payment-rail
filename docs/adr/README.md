@@ -63,3 +63,4 @@ Numbering is sequential (`NNNN-kebab-title.md`). Status is one of:
 | [0027](0027-in-process-fault-injection-via-seams.md) | In-process fault injection through existing seams (M7) | Accepted |
 | [0028](0028-chain-watcher-and-reorg-harness.md) | Chain watcher: poll seam, two-pronged reorg detection, simulated-backend harness (M3) | Accepted (terminal-phase consequences superseded by ADR-0014) |
 | [0029](0029-preview-environment-caller-and-template.md) | Preview environments: topology-only PaymentStack template & reusable-workflow caller | Accepted |
+| [0030](0030-front-door-docs-are-a-verified-contract.md) | The front door is a contract — fixed README order, no process vocabulary, every claim verified | Accepted |

@@ -1,8 +1,8 @@
-# Payment Rail — Go Learning Journal
+# Payment Rail — Design Notes
 
-Payment Rail is a deliberate Go learning vehicle. Each milestone produces a lesson
-capturing the **why** behind the code: the Go idioms used, the alternatives
-weighed, and the mistakes avoided. This index links them in order.
+Design notes and rationale, per subsystem: the Go idioms used, the alternatives
+weighed, and the mistakes avoided behind each part of the code. This index
+links them in build order.
 
 | Milestone | Lesson | Focus |
 |-----------|--------|-------|
@@ -18,4 +18,4 @@ weighed, and the mistakes avoided. This index links them in order.
 | M7 | [m7-chaos-and-load-testing.md](m7-chaos-and-load-testing.md) | In-process fault injection at the `ledger.Store`/`ethRPC` seams (crash, connection kill via `pg_terminate_backend`, broken RPC, reorg) gated on an `assertConverged` closed-ledger + reconcile oracle, plus a stdlib-only load harness with per-worker lock-free latency slices, an `Op func(ctx) Outcome` seam, the cancelled-tail sample the deadline would otherwise poison, a traffic pattern derived from the SUT's idempotency and row-locking, and an honestly-scoped commit-throughput benchmark read through Little's Law |
 | Ops | [ops-preview-environment-caller.md](ops-preview-environment-caller.md) | The caller half of a cross-repo contract: a `pull_request` workflow invoking bosun's reusable `workflow_call` (named secret instead of `secrets: inherit`, `pull_request` over `pull_request_target`, per-PR concurrency made safe by the callee's `if: always()` cleanup, `@main` inside a trust boundary), a topology-only `PaymentStack` template cut from four apps to one after a review falsified the plan's premise against the CRD, defaults derived by reading the producer's source (`expiresAt` from `CreationTimestamp` + SHA-free naming ⇒ TTL never extends), declarative minimalism as server-side-apply field ownership, and a label-length budget exhausted one derivation level deeper than its author counted |
 
-_The journal is complete through M7 — every shipped milestone has a lesson._
+_Every subsystem shipped so far has a design note here._

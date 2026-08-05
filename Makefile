@@ -1,4 +1,4 @@
-# Payment Rail developer Makefile. Targets assume Go 1.24+ and (for up/down) Docker.
+# Payment Rail developer Makefile. Targets assume Go 1.26+ and (for up/down) Docker.
 
 BINARIES   := api ledger signer chainwatcher outboxrelay webhookd paymentrailctl
 BIN_DIR    := bin
